@@ -1,50 +1,117 @@
-# Welcome to your Expo app 👋
+# Sortlist iOS
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+A React Native (Expo) iOS client for [Sortlist](https://www.sortlist.shop) — an
+AI shopping organiser. Save products from anywhere, sort them into collections,
+and tap through to buy.
 
-## Get started
+## Stack
 
-1. Install dependencies
+- **Expo SDK 54** with `expo-router` (file-based routing)
+- **tRPC v11** + **TanStack Query v5** against
+  `https://www.sortlist.shop/api/trpc`
+- **JWT cookie auth** stored on-device via `expo-secure-store`
+- **iOS share extension** via `expo-share-extension` — saves Safari URLs into
+  the app via deep link
+- **Brand**: Instrument Serif headings, system sans body, coral `#FF5B3A` /
+  cream `#FAF8F3` / ink `#1A1A1A`
 
-   ```bash
-   npm install
-   ```
+## Screens
 
-2. Start the app
+| Route                    | Purpose                                                |
+| ------------------------ | ------------------------------------------------------ |
+| `/(auth)/login`          | Email + password login, register, Google sign-in       |
+| `/(auth)/forgot`         | Password reset link request                            |
+| `/(app)/index`           | Sortlists home — 2-column grid with cover + count      |
+| `/(app)/sortlist/[id]`   | Sortlist detail — product list, tap opens buy link     |
+| `/(app)/add`             | Add product modal — URL scrape + sortlist picker       |
+| Share extension          | Catches a shared URL → deep-links into `/(app)/add`    |
 
-   ```bash
-   npx expo start
-   ```
+## Backend integration
 
-In the output, you'll find options to open the app in a
+The backend is a single-page web app at sortlist.shop with a tRPC v11 API. The
+client uses the procedures (terminology: backend "collections" === UI
+"sortlists"):
 
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
+- `auth.me`, `auth.login`, `auth.register`, `auth.logout`,
+  `auth.requestPasswordReset`, `auth.resetPassword`
+- `collections.list / create / update / delete`
+- `products.list / add / update / delete / setStatus`
+- `meta.fetch` — server-side URL → `{ title, imageUrl, price, siteName }` scrape
+- `tags.list`
 
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
+Auth uses an HttpOnly JWT cookie. `lib/trpc.ts` overrides fetch to capture
+`Set-Cookie` headers and store them in `expo-secure-store`, then attaches the
+cookie to every subsequent tRPC call.
 
-## Get a fresh project
+Google sign-in opens `/api/auth/google` in `expo-web-browser` and re-fetches
+`auth.me` on return.
 
-When you're ready, run:
+## Share extension
 
-```bash
-npm run reset-project
+When a user taps Share → Sortlist in Safari, `index.share.js` boots
+`ShareExtension.tsx`. The extension lets the user confirm/edit the URL, then
+calls `openHostApp("add?url=…")` which deep-links into the host app at
+`sortlist://add?url=…`. `lib/deep-link.ts` listens and routes to
+`/(app)/add`, which auto-fetches metadata and shows the save form.
+
+The extension currently activates on:
+
+- `url` (Safari share)
+- `text` (any selected text — we extract the first URL)
+
+## Project structure
+
+```
+app/
+  _layout.tsx              root, providers, auth-gated routing, deep-link handler
+  (auth)/login.tsx         login + register
+  (auth)/forgot.tsx        password reset
+  (app)/index.tsx          sortlists grid (home)
+  (app)/sortlist/[id].tsx  sortlist detail
+  (app)/add.tsx            add-product modal
+components/ui/             text, button, input, screen primitives
+constants/theme.ts         brand colors, fonts, spacing
+lib/
+  config.ts                base URLs
+  session.ts               cookie persistence
+  trpc.ts                  tRPC client + cookie-aware fetch
+  auth.tsx                 AuthContext, signIn/Out wrappers
+  providers.tsx            tRPC + react-query providers
+  deep-link.ts             share-extension deep link routing
+  types.ts                 domain types
+ShareExtension.tsx         iOS share extension UI
+index.share.js             share extension RN entry
+index.js                   main app entry
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+## Run locally
 
-## Learn more
+```bash
+npm install
+npx expo prebuild --platform ios
+npx expo run:ios            # requires Xcode + macOS for native builds
+```
 
-To learn more about developing your project with Expo, look at the following resources:
+The share extension and JWT cookie storage both require a **development
+build** — Expo Go does not include native code from `expo-share-extension` or
+`expo-secure-store`.
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+For a TestFlight / device build:
 
-## Join the community
+```bash
+eas build --profile development --platform ios
+```
 
-Join our community of developers creating universal apps.
+## Configuration
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+- Bundle ID: `com.alexesterkin.sortlist`
+- URL scheme: `sortlist://`
+- Universal links: `applinks:sortlist.shop`, `applinks:www.sortlist.shop`
+- Backend base URL: `lib/config.ts`
+
+## Notes
+
+- The backend's `AppRouter` type is not vendored into this repo; tRPC hooks are
+  typed permissively and procedure shapes are documented in `lib/types.ts`.
+- React Native's `fetch` doesn't fully manage cookies cross-request, so we
+  capture `Set-Cookie` manually after each response and re-attach it.

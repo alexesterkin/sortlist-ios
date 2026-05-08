@@ -1,19 +1,28 @@
 {
   "expo": {
-    "name": "sortlist",
+    "name": "Sortlist",
     "slug": "sortlist",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "sortlist",
-    "userInterfaceStyle": "automatic",
+    "userInterfaceStyle": "light",
     "newArchEnabled": true,
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": false,
+      "bundleIdentifier": "com.alexesterkin.sortlist",
+      "associatedDomains": [
+        "applinks:sortlist.shop",
+        "applinks:www.sortlist.shop"
+      ],
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
+      "package": "com.alexesterkin.sortlist",
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
+        "backgroundColor": "#FAF8F3",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
         "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
@@ -27,22 +36,60 @@
     },
     "plugins": [
       "expo-router",
+      "expo-secure-store",
+      "expo-web-browser",
+      [
+        "expo-font",
+        {
+          "fonts": [
+            "./assets/fonts/InstrumentSerif-Regular.ttf",
+            "./assets/fonts/InstrumentSerif-Italic.ttf"
+          ]
+        }
+      ],
       [
         "expo-splash-screen",
         {
           "image": "./assets/images/splash-icon.png",
           "imageWidth": 200,
           "resizeMode": "contain",
-          "backgroundColor": "#ffffff",
+          "backgroundColor": "#FAF8F3",
           "dark": {
-            "backgroundColor": "#000000"
+            "backgroundColor": "#1A1A1A"
           }
+        }
+      ],
+      [
+        "expo-share-extension",
+        {
+          "height": 480,
+          "backgroundColor": {
+            "red": 250,
+            "green": 248,
+            "blue": 243,
+            "alpha": 1
+          },
+          "activationRules": [
+            { "type": "url", "max": 1 },
+            { "type": "text" }
+          ],
+          "excludedPackages": [
+            "expo-dev-client",
+            "expo-splash-screen",
+            "expo-updates"
+          ]
         }
       ]
     ],
     "experiments": {
-      "typedRoutes": true,
+      "typedRoutes": false,
       "reactCompiler": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "edb058b6-8512-424c-bb56-e65474134ba5"
+      }
     }
   }
 }
