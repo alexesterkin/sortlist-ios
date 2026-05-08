@@ -4,6 +4,7 @@ import { router } from 'expo-router';
 import { useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
   Pressable,
   RefreshControl,
@@ -13,21 +14,17 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Text } from '@/components/ui/text';
-import {
-  Brand,
-  Radius,
-  Spacing,
-  coverColorFor,
-} from '@/constants/theme';
+import { Brand, Spacing, coverColorFor } from '@/constants/theme';
 import { useAuth } from '@/lib/auth';
 import { trpc } from '@/lib/trpc';
 import type { Collection, Product } from '@/lib/types';
 
 export default function SortlistsScreen() {
   const insets = useSafeAreaInsets();
-  const { user, signOut } = useAuth();
+  const { signOut } = useAuth();
   const [refreshing, setRefreshing] = useState(false);
 
+  const utils = trpc.useUtils();
   const collectionsQuery = trpc.collections.list.useQuery(undefined, {
     retry: 1,
   });
@@ -35,6 +32,9 @@ export default function SortlistsScreen() {
     { status: 'all' },
     { retry: 1 },
   );
+  const createCollection = trpc.collections.create.useMutation({
+    onSuccess: () => utils.collections.list.invalidate(),
+  });
 
   const onRefresh = async () => {
     setRefreshing(true);
@@ -45,8 +45,6 @@ export default function SortlistsScreen() {
   const collections = ((collectionsQuery.data ?? []) as Collection[]).slice();
   const products = (productsQuery.data ?? []) as Product[];
 
-  // The backend already sends `itemCount` per collection. We still derive a
-  // cover image client-side from the latest product whose imageUrl we know.
   const coversByCollection = new Map<number, string>();
   for (const p of products) {
     if (p.collectionId == null) continue;
@@ -59,7 +57,27 @@ export default function SortlistsScreen() {
     (collectionsQuery.isLoading || productsQuery.isLoading) && !refreshing;
   const fetchError = collectionsQuery.error ?? productsQuery.error;
 
-  const greeting = user?.name ? user.name.split(' ')[0] : 'there';
+  // Alert.prompt is iOS-only — we ship iOS only, so this is the simplest
+  // path to a native-feeling input dialog.
+  const promptCreate = () => {
+    Alert.prompt(
+      'New Sortlist',
+      'Name your sortlist',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Create',
+          onPress: (name?: string) => {
+            const trimmed = (name ?? '').trim();
+            if (!trimmed) return;
+            createCollection.mutate({ name: trimmed });
+          },
+        },
+      ],
+      'plain-text',
+      '',
+    );
+  };
 
   return (
     <View style={[styles.root, { paddingTop: insets.top }]}>
@@ -75,18 +93,15 @@ export default function SortlistsScreen() {
         ListHeaderComponent={
           <View>
             <View style={styles.topbar}>
-              <View style={{ flex: 1 }}>
-                <Text variant="caption">Hi {greeting},</Text>
-                <Text variant="display" style={styles.h1}>
-                  Sortlists
-                </Text>
-              </View>
+              <Text variant="display" style={styles.h1}>
+                Sortlists
+              </Text>
               <Pressable
                 hitSlop={12}
                 onPress={() => signOut()}
                 style={styles.iconBtn}
                 accessibilityLabel="Sign out">
-                <Ionicons name="log-out-outline" size={22} color={Brand.ink} />
+                <Ionicons name="log-out-outline" size={20} color={Brand.ink} />
               </Pressable>
             </View>
             {isLoading ? (
@@ -98,20 +113,19 @@ export default function SortlistsScreen() {
               <ErrorState
                 message={
                   fetchError.message?.includes('Network')
-                    ? "Couldn't reach Sortlist. Check your connection and pull to refresh."
+                    ? "Couldn't reach Sortlist. Pull to refresh."
                     : (fetchError.message ?? 'Something went wrong.')
                 }
               />
             ) : null}
             {!isLoading && !fetchError && collections.length === 0 ? (
-              <EmptyState />
+              <EmptyState onCreate={promptCreate} />
             ) : null}
           </View>
         }
         renderItem={({ item }) => (
           <SortlistCard
             collection={item}
-            count={item.itemCount ?? 0}
             cover={coversByCollection.get(item.id) ?? item.coverImageUrl ?? null}
             onPress={() =>
               router.push(`/(app)/sortlist/${item.id}` as never)
@@ -128,14 +142,17 @@ export default function SortlistsScreen() {
       />
 
       <Pressable
-        accessibilityLabel="Add product"
-        onPress={() => router.push('/(app)/add')}
+        accessibilityLabel="New Sortlist"
+        onPress={promptCreate}
         style={({ pressed }) => [
           styles.fab,
           { bottom: insets.bottom + Spacing.xl },
           pressed && { backgroundColor: Brand.coralDark },
         ]}>
-        <Ionicons name="add" size={28} color="#fff" />
+        <Ionicons name="add" size={22} color="#fff" />
+        <Text style={styles.fabLabel} allowFontScaling={false}>
+          New Sortlist
+        </Text>
       </Pressable>
     </View>
   );
@@ -143,12 +160,10 @@ export default function SortlistsScreen() {
 
 function SortlistCard({
   collection,
-  count,
   cover,
   onPress,
 }: {
   collection: Collection;
-  count: number;
   cover: string | null;
   onPress: () => void;
 }) {
@@ -159,12 +174,17 @@ function SortlistCard({
       style={({ pressed }) => [styles.card, pressed && { opacity: 0.85 }]}>
       <View style={[styles.cover, { backgroundColor: tint }]}>
         {cover ? (
-          <Image
-            source={{ uri: cover }}
-            style={StyleSheet.absoluteFillObject}
-            contentFit="cover"
-            transition={200}
-          />
+          <>
+            <Image
+              source={{ uri: cover }}
+              style={StyleSheet.absoluteFillObject}
+              contentFit="cover"
+              transition={200}
+            />
+            {/* Inset hairline so a product image with a white background
+                doesn't visually bleed into the white card. */}
+            <View pointerEvents="none" style={styles.coverInsetBorder} />
+          </>
         ) : (
           <Text
             variant="display"
@@ -179,9 +199,6 @@ function SortlistCard({
         <Text variant="subtitle" numberOfLines={1}>
           {collection.name}
         </Text>
-        <Text variant="caption">
-          {count} {count === 1 ? 'item' : 'items'}
-        </Text>
       </View>
     </Pressable>
   );
@@ -193,7 +210,7 @@ function initial(name: string) {
   return trimmed.charAt(0).toUpperCase();
 }
 
-function EmptyState() {
+function EmptyState({ onCreate }: { onCreate: () => void }) {
   return (
     <View style={styles.empty}>
       <View style={styles.emptyIcon}>
@@ -203,9 +220,19 @@ function EmptyState() {
         No sortlists yet
       </Text>
       <Text variant="caption" style={styles.emptyText}>
-        Tap the + button to save your first product. We&apos;ll create a
-        sortlist for it automatically.
+        Group your saved products — like Trainers, Birthday gifts, or Home decor.
       </Text>
+      <Pressable
+        onPress={onCreate}
+        style={({ pressed }) => [
+          styles.emptyCta,
+          pressed && { backgroundColor: Brand.coralDark },
+        ]}>
+        <Ionicons name="add" size={18} color="#fff" />
+        <Text style={styles.fabLabel} allowFontScaling={false}>
+          New Sortlist
+        </Text>
+      </Pressable>
     </View>
   );
 }
@@ -236,23 +263,20 @@ const styles = StyleSheet.create({
   },
   topbar: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
+    alignItems: 'center',
     marginBottom: Spacing.lg,
   },
   h1: {
+    flex: 1,
     fontSize: 44,
     lineHeight: 48,
-    marginTop: 4,
   },
   iconBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#fff',
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: Brand.line,
   },
   row: {
     gap: CARD_GAP,
@@ -272,6 +296,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  coverInsetBorder: {
+    ...StyleSheet.absoluteFillObject,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(0,0,0,0.08)',
+  },
   coverInitial: {
     fontSize: 72,
     lineHeight: 80,
@@ -279,7 +308,6 @@ const styles = StyleSheet.create({
   cardMeta: {
     paddingHorizontal: Spacing.md,
     paddingVertical: Spacing.md,
-    gap: 2,
   },
   loading: {
     paddingVertical: Spacing.xl,
@@ -305,19 +333,35 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     maxWidth: 260,
   },
+  emptyCta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 18,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: Brand.coral,
+    marginTop: Spacing.sm,
+  },
   fab: {
     position: 'absolute',
     right: Spacing.xl,
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    backgroundColor: Brand.coral,
+    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
+    gap: 6,
+    paddingHorizontal: 18,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: Brand.coral,
     shadowColor: '#FF5B3A',
     shadowOffset: { width: 0, height: 8 },
     shadowOpacity: 0.35,
     shadowRadius: 16,
     elevation: 6,
+  },
+  fabLabel: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '600',
   },
 });

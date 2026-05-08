@@ -137,12 +137,17 @@ function ProductRow({ product }: { product: Product }) {
       style={({ pressed }) => [styles.card, pressed && { opacity: 0.92 }]}>
       <View style={styles.thumb}>
         {product.imageUrl ? (
-          <Image
-            source={{ uri: product.imageUrl }}
-            style={StyleSheet.absoluteFillObject}
-            contentFit="cover"
-            transition={150}
-          />
+          <>
+            <Image
+              source={{ uri: product.imageUrl }}
+              style={StyleSheet.absoluteFillObject}
+              contentFit="cover"
+              transition={150}
+            />
+            {/* Subtle hairline so product photos with white backgrounds
+                don't bleed into the white card. */}
+            <View pointerEvents="none" style={styles.thumbBorder} />
+          </>
         ) : (
           <Ionicons name="bag-outline" size={24} color={Brand.inkMuted} />
         )}
@@ -222,6 +227,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     overflow: 'hidden',
+  },
+  thumbBorder: {
+    ...StyleSheet.absoluteFillObject,
+    borderRadius: 14,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(0,0,0,0.08)',
   },
   cardBody: { flex: 1, justifyContent: 'space-between' },
   brandLabel: {
