@@ -26,7 +26,6 @@ const AuthContext = createContext<AuthState | null>(null);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [hydrated, setHydrated] = useState(false);
-  const [hasCookie, setHasCookie] = useState(false);
 
   const me = trpc.auth.me.useQuery(undefined, {
     enabled: hydrated,
@@ -40,11 +39,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const logoutMutation = trpc.auth.logout.useMutation();
 
   useEffect(() => {
-    void loadSessionCookie().then((c) => {
-      setHasCookie(!!c);
-      setHydrated(true);
+    void loadSessionCookie().then(() => setHydrated(true));
+    // Refetch the session whenever the cookie changes (e.g. after sign-in).
+    return onSessionChange(() => {
+      void me.refetch();
     });
-    return onSessionChange((c) => setHasCookie(!!c));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const signInWithEmail = useCallback(
@@ -122,9 +122,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       refresh,
     ],
   );
-
-  // Side-effect: keep `hasCookie` referenced so unused-var lints stay quiet.
-  void hasCookie;
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

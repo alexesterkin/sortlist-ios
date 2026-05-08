@@ -9,15 +9,17 @@ import {
   StyleSheet,
   View,
 } from 'react-native';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { ScrollView } from 'react-native-gesture-handler';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Screen } from '@/components/ui/screen';
 import { Text } from '@/components/ui/text';
 import { Brand, Spacing } from '@/constants/theme';
 import { useAuth } from '@/lib/auth';
 
 export default function LoginScreen() {
+  const insets = useSafeAreaInsets();
   const { signInWithEmail, registerWithEmail, signInWithGoogle } = useAuth();
 
   const [mode, setMode] = useState<'login' | 'register'>('login');
@@ -46,7 +48,7 @@ export default function LoginScreen() {
         await registerWithEmail(name.trim(), email.trim(), password);
       }
     } catch (e: unknown) {
-      const message = e instanceof Error ? e.message : 'Could not sign in.';
+      const message = e instanceof Error ? e.message : "Couldn't sign in.";
       setError(message);
     } finally {
       setSubmitting(false);
@@ -66,147 +68,198 @@ export default function LoginScreen() {
   };
 
   return (
-    <Screen scroll bg={Brand.cream}>
+    <SafeAreaView style={styles.root}>
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         style={{ flex: 1 }}>
-        <View style={styles.brand}>
-          <View style={styles.logoDot} />
-          <Text variant="display" style={styles.brandTitle}>
-            Sortlist
-          </Text>
-          <Text variant="caption" style={styles.tagline}>
-            Save & organise your shopping finds.
-          </Text>
-        </View>
-
-        <View style={styles.form}>
-          <Text variant="title" style={styles.h1}>
-            {mode === 'login' ? 'Welcome back' : 'Create account'}
-          </Text>
-
-          {mode === 'register' ? (
-            <Input
-              label="Name"
-              autoCapitalize="words"
-              autoComplete="name"
-              textContentType="name"
-              value={name}
-              onChangeText={setName}
-              placeholder="Your name"
-            />
-          ) : null}
-
-          <Input
-            label="Email"
-            autoCapitalize="none"
-            autoCorrect={false}
-            keyboardType="email-address"
-            autoComplete="email"
-            textContentType="emailAddress"
-            value={email}
-            onChangeText={setEmail}
-            placeholder="you@example.com"
-          />
-
-          <Input
-            label="Password"
-            secureTextEntry
-            autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
-            textContentType={mode === 'login' ? 'password' : 'newPassword'}
-            value={password}
-            onChangeText={setPassword}
-            placeholder="••••••••"
-          />
-
-          {error ? (
-            <Text variant="caption" color={Brand.danger}>
-              {error}
+        <ScrollView
+          contentContainerStyle={[
+            styles.scroll,
+            { paddingBottom: insets.bottom + Spacing.xl },
+          ]}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}>
+          <View style={styles.brand}>
+            <View style={styles.logoMark}>
+              <View style={styles.logoBar} />
+              <View
+                style={[styles.logoBar, { width: 18, opacity: 0.85 }]}
+              />
+              <View
+                style={[styles.logoBar, { width: 12, opacity: 0.7 }]}
+              />
+            </View>
+            <Text variant="display" style={styles.wordmark}>
+              Sortlist
             </Text>
-          ) : null}
-
-          {mode === 'login' ? (
-            <Link href="/(auth)/forgot" asChild>
-              <Pressable style={styles.forgotLink} hitSlop={8}>
-                <Text variant="caption" color={Brand.coral}>
-                  Forgot password?
-                </Text>
-              </Pressable>
-            </Link>
-          ) : null}
-
-          <Button
-            title={mode === 'login' ? 'Sign in' : 'Create account'}
-            onPress={submit}
-            loading={submitting}
-          />
-
-          <View style={styles.divider}>
-            <View style={styles.line} />
-            <Text variant="caption" style={styles.dividerText}>
-              or
+            <Text variant="caption" style={styles.tagline}>
+              Save & organise your shopping finds.
             </Text>
-            <View style={styles.line} />
           </View>
 
-          <Button
-            title="Continue with Google"
-            variant="outline"
-            loading={googleLoading}
-            leftIcon={<Ionicons name="logo-google" size={18} color={Brand.ink} />}
-            onPress={onGoogle}
-          />
-
-          <Pressable
-            style={styles.switchMode}
-            onPress={() => setMode((m) => (m === 'login' ? 'register' : 'login'))}>
-            <Text variant="caption" style={{ textAlign: 'center' }}>
-              {mode === 'login'
-                ? "Don't have an account? "
-                : 'Already have an account? '}
-              <Text variant="caption" color={Brand.coral}>
-                {mode === 'login' ? 'Sign up' : 'Sign in'}
-              </Text>
+          <View style={styles.form}>
+            <Text variant="title" style={styles.h1}>
+              {mode === 'login' ? 'Welcome back' : 'Create account'}
             </Text>
-          </Pressable>
-        </View>
+
+            {mode === 'register' ? (
+              <Input
+                label="Name"
+                autoCapitalize="words"
+                autoComplete="name"
+                textContentType="name"
+                value={name}
+                onChangeText={setName}
+                placeholder="Your name"
+              />
+            ) : null}
+
+            <Input
+              label="Email"
+              autoCapitalize="none"
+              autoCorrect={false}
+              keyboardType="email-address"
+              autoComplete="email"
+              textContentType="emailAddress"
+              value={email}
+              onChangeText={setEmail}
+              placeholder="you@example.com"
+            />
+
+            <Input
+              label="Password"
+              secureTextEntry
+              autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
+              textContentType={mode === 'login' ? 'password' : 'newPassword'}
+              value={password}
+              onChangeText={setPassword}
+              placeholder="••••••••"
+            />
+
+            {error ? (
+              <View style={styles.errorBox}>
+                <Ionicons
+                  name="alert-circle-outline"
+                  size={16}
+                  color={Brand.danger}
+                />
+                <Text variant="caption" color={Brand.danger} style={{ flex: 1 }}>
+                  {error}
+                </Text>
+              </View>
+            ) : null}
+
+            {mode === 'login' ? (
+              <Link href="/(auth)/forgot" asChild>
+                <Pressable style={styles.forgotLink} hitSlop={8}>
+                  <Text variant="caption" color={Brand.coral}>
+                    Forgot password?
+                  </Text>
+                </Pressable>
+              </Link>
+            ) : null}
+
+            <Button
+              title={mode === 'login' ? 'Sign in' : 'Create account'}
+              onPress={submit}
+              loading={submitting}
+            />
+
+            <View style={styles.divider}>
+              <View style={styles.line} />
+              <Text variant="caption" style={styles.dividerText}>
+                or
+              </Text>
+              <View style={styles.line} />
+            </View>
+
+            <Button
+              title="Continue with Google"
+              variant="outline"
+              loading={googleLoading}
+              leftIcon={<Ionicons name="logo-google" size={18} color={Brand.ink} />}
+              onPress={onGoogle}
+            />
+
+            <Pressable
+              style={styles.switchMode}
+              onPress={() => {
+                setError(null);
+                setMode((m) => (m === 'login' ? 'register' : 'login'));
+              }}>
+              <Text variant="caption" style={{ textAlign: 'center' }}>
+                {mode === 'login'
+                  ? "Don't have an account? "
+                  : 'Already have an account? '}
+                <Text variant="caption" color={Brand.coral}>
+                  {mode === 'login' ? 'Sign up' : 'Sign in'}
+                </Text>
+              </Text>
+            </Pressable>
+          </View>
+        </ScrollView>
       </KeyboardAvoidingView>
-    </Screen>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
+  root: { flex: 1, backgroundColor: Brand.cream },
+  scroll: {
+    flexGrow: 1,
+    paddingHorizontal: Spacing.xl,
+    paddingTop: Spacing.xl,
+  },
   brand: {
     alignItems: 'center',
-    marginTop: Spacing.xxl,
-    marginBottom: Spacing.xl,
-    gap: Spacing.sm,
+    marginTop: Spacing.xl,
+    marginBottom: Spacing.lg,
+    gap: 6,
   },
-  logoDot: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
+  logoMark: {
+    width: 64,
+    height: 64,
+    borderRadius: 18,
     backgroundColor: Brand.coral,
     marginBottom: Spacing.sm,
+    alignItems: 'flex-start',
+    justifyContent: 'center',
+    paddingHorizontal: 14,
+    gap: 4,
   },
-  brandTitle: {
-    fontSize: 48,
-    lineHeight: 52,
+  logoBar: {
+    width: 28,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: Brand.cream,
+  },
+  wordmark: {
+    fontSize: 56,
+    lineHeight: 60,
   },
   tagline: {
-    color: Brand.inkSoft,
+    color: Brand.inkMuted,
     textAlign: 'center',
   },
   form: {
-    gap: Spacing.lg,
+    gap: Spacing.md,
     paddingTop: Spacing.lg,
   },
   h1: {
-    marginBottom: Spacing.sm,
+    marginBottom: Spacing.xs,
+  },
+  errorBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#FBE3DC',
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+    borderRadius: 12,
   },
   forgotLink: {
     alignSelf: 'flex-end',
-    marginTop: -Spacing.sm,
+    marginTop: -Spacing.xs,
   },
   divider: {
     flexDirection: 'row',

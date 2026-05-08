@@ -22,6 +22,7 @@ import { trpc } from '@/lib/trpc';
 import type { Collection, MetaFetchResult } from '@/lib/types';
 
 const NEW_SORTLIST = '__new__';
+const NO_SORTLIST = 'none';
 
 export default function AddProductScreen() {
   const params = useLocalSearchParams<{ url?: string; collectionId?: string }>();
@@ -33,10 +34,9 @@ export default function AddProductScreen() {
   const [imageUrl, setImageUrl] = useState('');
   const [notes, setNotes] = useState('');
   const [selectedSortlist, setSelectedSortlist] = useState<string>(
-    params.collectionId ?? 'none',
+    params.collectionId ?? NO_SORTLIST,
   );
   const [newSortlistName, setNewSortlistName] = useState('');
-  const [error, setError] = useState<string | null>(null);
   const [scrapeError, setScrapeError] = useState<string | null>(null);
   const [didAutoFetch, setDidAutoFetch] = useState(false);
 
@@ -55,6 +55,7 @@ export default function AddProductScreen() {
   });
 
   const isNewSortlist = selectedSortlist === NEW_SORTLIST;
+  const hasMeta = meta !== null;
 
   const canSave = useMemo(() => {
     if (!url.trim() || !title.trim()) return false;
@@ -89,14 +90,14 @@ export default function AddProductScreen() {
         setScrapeError(result.blocked_message);
       } else {
         setTitle(result.title ?? '');
-        setPrice(result.price ?? '');
+        setPrice(formatPrice(result.price, result.currency) ?? '');
         setImageUrl(result.imageUrl ?? '');
       }
     } catch (e: unknown) {
       setScrapeError(
         e instanceof Error
           ? e.message
-          : 'Could not fetch metadata. You can fill in details manually.',
+          : "Couldn't fetch page details. You can still fill them in manually.",
       );
     }
   };
@@ -117,7 +118,7 @@ export default function AddProductScreen() {
 
     if (isNewSortlist) {
       payload.newCollectionName = newSortlistName.trim();
-    } else if (selectedSortlist !== 'none') {
+    } else if (selectedSortlist !== NO_SORTLIST) {
       payload.collectionId = parseInt(selectedSortlist, 10);
     }
 
@@ -125,9 +126,8 @@ export default function AddProductScreen() {
       await addProduct.mutateAsync(payload);
       router.back();
     } catch (e: unknown) {
-      const message = e instanceof Error ? e.message : 'Failed to save product.';
-      setError(message);
-      Alert.alert('Save failed', message);
+      const message = e instanceof Error ? e.message : 'Could not save product.';
+      Alert.alert("Couldn't save", message);
     }
   };
 
@@ -139,6 +139,7 @@ export default function AddProductScreen() {
           title: 'Add product',
           headerStyle: { backgroundColor: Brand.cream },
           headerShadowVisible: false,
+          headerTitleStyle: { color: Brand.ink, fontSize: 17 },
           headerLeft: () => (
             <Pressable hitSlop={12} onPress={() => router.back()}>
               <Text variant="body" color={Brand.ink}>
@@ -151,12 +152,16 @@ export default function AddProductScreen() {
 
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        style={{ flex: 1 }}>
+        style={{ flex: 1 }}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 64 : 0}>
         <ScrollView
           contentContainerStyle={styles.content}
-          keyboardShouldPersistTaps="handled">
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="on-drag">
           <View style={styles.section}>
-            <Text variant="caption">Product URL</Text>
+            <Text variant="caption" style={styles.sectionLabel}>
+              Paste a link
+            </Text>
             <View style={styles.urlRow}>
               <Input
                 value={url}
@@ -177,12 +182,30 @@ export default function AddProductScreen() {
                 <Ionicons name="clipboard-outline" size={18} color={Brand.ink} />
               </Pressable>
             </View>
-            <Button
-              title={fetchMeta.isPending ? 'Fetching…' : 'Fetch details'}
-              onPress={onFetch}
-              loading={fetchMeta.isPending}
-              variant="outline"
-            />
+            {!hasMeta ? (
+              <Pressable
+                onPress={onFetch}
+                disabled={!url.trim() || fetchMeta.isPending}
+                style={({ pressed }) => [
+                  styles.fetchHint,
+                  pressed && { opacity: 0.7 },
+                ]}>
+                {fetchMeta.isPending ? (
+                  <ActivityIndicator color={Brand.coral} size="small" />
+                ) : (
+                  <Ionicons
+                    name="sparkles-outline"
+                    size={16}
+                    color={Brand.coral}
+                  />
+                )}
+                <Text variant="caption" color={Brand.coral}>
+                  {fetchMeta.isPending
+                    ? 'Reading the page…'
+                    : 'Fetch product details'}
+                </Text>
+              </Pressable>
+            ) : null}
             {scrapeError ? (
               <Text variant="caption" color={Brand.danger}>
                 {scrapeError}
@@ -214,6 +237,22 @@ export default function AddProductScreen() {
               onChangeText={setPrice}
               placeholder="£0.00"
             />
+            {meta?.brand ? (
+              <View style={styles.brandPill}>
+                <Text variant="caption" color={Brand.inkSoft}>
+                  Brand:{' '}
+                </Text>
+                <Text variant="caption" color={Brand.ink}>
+                  {meta.brand}
+                </Text>
+                {meta.siteName && meta.siteName !== meta.brand ? (
+                  <Text variant="caption" color={Brand.inkMuted}>
+                    {' '}
+                    · {meta.siteName}
+                  </Text>
+                ) : null}
+              </View>
+            ) : null}
             <Input
               label="Image URL"
               value={imageUrl}
@@ -234,7 +273,9 @@ export default function AddProductScreen() {
           </View>
 
           <View style={styles.section}>
-            <Text variant="caption">Sortlist</Text>
+            <Text variant="caption" style={styles.sectionLabel}>
+              Sortlist
+            </Text>
             {collectionsQuery.isLoading ? (
               <ActivityIndicator color={Brand.coral} />
             ) : (
@@ -254,17 +295,12 @@ export default function AddProductScreen() {
             ) : null}
           </View>
 
-          {error ? (
-            <Text variant="caption" color={Brand.danger}>
-              {error}
-            </Text>
-          ) : null}
-
           <Button
-            title="Save"
+            title="Add to Sortlist"
             onPress={onSave}
             loading={addProduct.isPending}
             disabled={!canSave}
+            style={{ marginTop: Spacing.sm }}
           />
         </ScrollView>
       </KeyboardAvoidingView>
@@ -282,7 +318,7 @@ function SortlistPicker({
   onChange: (v: string) => void;
 }) {
   const items: { id: string; label: string }[] = [
-    { id: 'none', label: 'No sortlist' },
+    { id: NO_SORTLIST, label: 'No sortlist' },
     ...collections.map((c) => ({ id: String(c.id), label: c.name })),
     { id: NEW_SORTLIST, label: '+ New sortlist' },
   ];
@@ -318,40 +354,81 @@ function SortlistPicker({
   );
 }
 
+function formatPrice(value: string | undefined, currency: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  if (!currency) return trimmed;
+  // If the price already has a currency symbol, leave it alone.
+  if (/[£$€¥₩₹]/.test(trimmed)) return trimmed;
+  const symbol: Record<string, string> = {
+    GBP: '£',
+    USD: '$',
+    EUR: '€',
+    JPY: '¥',
+    KRW: '₩',
+    INR: '₹',
+  };
+  const sym = symbol[currency.toUpperCase()];
+  return sym ? `${sym}${trimmed}` : `${currency} ${trimmed}`;
+}
+
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: Brand.cream },
   content: {
     paddingHorizontal: Spacing.xl,
-    paddingBottom: Spacing.xxl,
+    paddingTop: Spacing.md,
+    paddingBottom: Spacing.xxl * 1.5,
     gap: Spacing.xl,
   },
   section: { gap: Spacing.md },
+  sectionLabel: {
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+    color: Brand.inkMuted,
+    fontSize: 11,
+  },
   urlRow: { flexDirection: 'row', alignItems: 'flex-end', gap: Spacing.sm },
   pasteBtn: {
     width: 52,
     height: 52,
     borderRadius: Radius.md,
     backgroundColor: '#fff',
-    borderWidth: 1,
+    borderWidth: StyleSheet.hairlineWidth,
     borderColor: Brand.line,
     alignItems: 'center',
     justifyContent: 'center',
   },
+  fetchHint: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: Spacing.xs,
+  },
   previewCard: {
     aspectRatio: 1,
-    borderRadius: Radius.lg,
+    borderRadius: 18,
     overflow: 'hidden',
     backgroundColor: '#fff',
-    borderWidth: 1,
+    borderWidth: StyleSheet.hairlineWidth,
     borderColor: Brand.line,
   },
   preview: { ...StyleSheet.absoluteFillObject },
+  brandPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+    backgroundColor: Brand.creamSoft,
+    borderRadius: 12,
+  },
   chip: {
     paddingHorizontal: 14,
     paddingVertical: 10,
     borderRadius: 999,
     backgroundColor: '#fff',
-    borderWidth: 1,
+    borderWidth: StyleSheet.hairlineWidth,
     borderColor: Brand.line,
   },
 });

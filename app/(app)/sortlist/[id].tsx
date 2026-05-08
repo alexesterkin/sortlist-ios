@@ -13,7 +13,7 @@ import {
 } from 'react-native';
 
 import { Text } from '@/components/ui/text';
-import { Brand, Radius, Spacing } from '@/constants/theme';
+import { Brand, Spacing, coverColorFor } from '@/constants/theme';
 import { trpc } from '@/lib/trpc';
 import type { Collection, Product } from '@/lib/types';
 
@@ -42,6 +42,7 @@ export default function SortlistDetailScreen() {
   };
 
   const isLoading = productsQuery.isLoading && !refreshing;
+  const tint = coverColorFor(collectionId);
 
   return (
     <View style={styles.root}>
@@ -52,6 +53,7 @@ export default function SortlistDetailScreen() {
           headerBackTitle: 'Back',
           headerStyle: { backgroundColor: Brand.cream },
           headerShadowVisible: false,
+          headerTintColor: Brand.ink,
           headerRight: () => (
             <Pressable
               hitSlop={10}
@@ -74,6 +76,11 @@ export default function SortlistDetailScreen() {
         ItemSeparatorComponent={() => <View style={{ height: Spacing.md }} />}
         ListHeaderComponent={
           <View style={styles.header}>
+            <View style={[styles.headerBadge, { backgroundColor: tint }]}>
+              <Text variant="display" style={styles.headerInitial}>
+                {(collection?.name ?? 'S').charAt(0).toUpperCase()}
+              </Text>
+            </View>
             <Text variant="display" style={styles.h1}>
               {collection?.name ?? 'Sortlist'}
             </Text>
@@ -118,13 +125,16 @@ function ProductRow({ product }: { product: Product }) {
       controlsColor: Brand.coral,
       toolbarColor: Brand.cream,
       dismissButtonStyle: 'done',
+      readerMode: false,
     });
   };
+
+  const brand = product.siteName ?? 'Product';
 
   return (
     <Pressable
       onPress={open}
-      style={({ pressed }) => [styles.card, pressed && { opacity: 0.9 }]}>
+      style={({ pressed }) => [styles.card, pressed && { opacity: 0.92 }]}>
       <View style={styles.thumb}>
         {product.imageUrl ? (
           <Image
@@ -138,8 +148,11 @@ function ProductRow({ product }: { product: Product }) {
         )}
       </View>
       <View style={styles.cardBody}>
-        <Text variant="caption" numberOfLines={1}>
-          {product.brand ?? product.siteName ?? 'Product'}
+        <Text
+          variant="caption"
+          numberOfLines={1}
+          style={styles.brandLabel}>
+          {brand}
         </Text>
         <Text variant="subtitle" numberOfLines={2} style={{ marginTop: 2 }}>
           {product.title ?? 'Untitled'}
@@ -152,12 +165,12 @@ function ProductRow({ product }: { product: Product }) {
           ) : (
             <Text variant="caption">No price</Text>
           )}
-          <Ionicons
-            name="open-outline"
-            size={16}
-            color={Brand.inkMuted}
-            style={{ marginLeft: 'auto' }}
-          />
+          <View style={styles.openHint}>
+            <Ionicons name="open-outline" size={14} color={Brand.inkMuted} />
+            <Text variant="caption" style={{ fontSize: 12 }}>
+              Open
+            </Text>
+          </View>
         </View>
       </View>
     </Pressable>
@@ -171,9 +184,21 @@ const styles = StyleSheet.create({
     paddingBottom: Spacing.xxl,
   },
   header: {
-    paddingTop: Spacing.sm,
+    paddingTop: 0,
     paddingBottom: Spacing.lg,
     gap: 4,
+  },
+  headerBadge: {
+    width: 56,
+    height: 56,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: Spacing.md,
+  },
+  headerInitial: {
+    fontSize: 36,
+    lineHeight: 40,
   },
   h1: {
     fontSize: 40,
@@ -182,8 +207,8 @@ const styles = StyleSheet.create({
   card: {
     flexDirection: 'row',
     backgroundColor: '#fff',
-    borderRadius: Radius.lg,
-    borderWidth: 1,
+    borderRadius: 18,
+    borderWidth: StyleSheet.hairlineWidth,
     borderColor: Brand.line,
     overflow: 'hidden',
     padding: Spacing.md,
@@ -192,13 +217,19 @@ const styles = StyleSheet.create({
   thumb: {
     width: 84,
     height: 84,
-    borderRadius: Radius.md,
-    backgroundColor: Brand.line,
+    borderRadius: 14,
+    backgroundColor: Brand.creamSoft,
     alignItems: 'center',
     justifyContent: 'center',
     overflow: 'hidden',
   },
   cardBody: { flex: 1, justifyContent: 'space-between' },
+  brandLabel: {
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+    fontSize: 11,
+    color: Brand.inkMuted,
+  },
   cardFoot: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -206,6 +237,12 @@ const styles = StyleSheet.create({
     gap: Spacing.sm,
   },
   price: { fontWeight: '600' },
+  openHint: {
+    marginLeft: 'auto',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
   empty: {
     paddingTop: Spacing.xxl,
     alignItems: 'center',

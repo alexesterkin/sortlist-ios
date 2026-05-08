@@ -3,42 +3,56 @@
 // keep these as the source of truth for the client.
 
 export type User = {
-  id: string | number;
+  id: number;
+  openId?: string;
   name: string | null;
   email: string;
+  loginMethod?: string;
+  role?: string;
+  createdAt?: Date | string;
+  updatedAt?: Date | string;
+  lastSignedIn?: Date | string | null;
   avatarUrl?: string | null;
 };
 
 export type Collection = {
   id: number;
+  userId?: number;
   name: string;
-  productCount?: number;
+  description?: string | null;
+  itemCount?: number;
   manuallyNamed?: boolean;
   coverImageUrl?: string | null;
-  createdAt?: string;
-  updatedAt?: string;
+  createdAt?: Date | string;
+  updatedAt?: Date | string;
 };
 
-export type ProductStatus = 'wishlist' | 'purchased' | 'archived' | string;
+export type ProductStatus = 'active' | 'archived' | 'purchased' | string;
 
 export type Product = {
   id: number;
+  userId?: number;
+  collectionId: number | null;
   url: string;
   title: string | null;
   price: string | null;
   imageUrl: string | null;
   siteName: string | null;
+  notes: string | null;
   status: ProductStatus;
-  collectionId: number | null;
-  notes?: string | null;
-  brand?: string | null;
-  createdAt?: string;
+  tags?: { id: number; name: string }[];
+  createdAt?: Date | string;
+  updatedAt?: Date | string;
 };
 
 export type MetaFetchResult = {
   title: string;
-  imageUrl: string;
+  brand: string;
   price: string;
+  currency?: string;
+  imageUrl: string;
   siteName: string;
+  confidence?: number;
+  extraction_method?: string;
   blocked_message?: string | null;
 };

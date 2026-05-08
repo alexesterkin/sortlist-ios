@@ -1,4 +1,5 @@
 import { createTRPCReact, httpBatchLink } from '@trpc/react-query';
+import superjson from 'superjson';
 import { TRPC_URL } from './config';
 import {
   getSessionCookie,
@@ -78,6 +79,7 @@ export function makeTRPCClient() {
       httpBatchLink({
         url: TRPC_URL,
         fetch: cookieFetch,
+        transformer: superjson,
       }),
     ],
   });

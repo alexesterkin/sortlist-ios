@@ -40,7 +40,11 @@ export function Button({
         styles.base,
         variantStyles[variant].container,
         fullWidth && { alignSelf: 'stretch' },
-        pressed && !isDisabled && { opacity: 0.85 },
+        pressed &&
+          !isDisabled &&
+          (variant === 'primary'
+            ? { backgroundColor: Brand.coralDark }
+            : { opacity: 0.85 }),
         isDisabled && { opacity: 0.5 },
         style,
       ]}>
