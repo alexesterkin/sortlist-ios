@@ -3,6 +3,7 @@ import { Link } from 'expo-router';
 import { useState } from 'react';
 import {
   Alert,
+  Keyboard,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -31,14 +32,22 @@ export default function LoginScreen() {
   const [error, setError] = useState<string | null>(null);
 
   const submit = async () => {
+    if (submitting) return;
     if (!email.trim() || !password) {
       setError('Please enter your email and password.');
       return;
     }
-    if (mode === 'register' && !name.trim()) {
-      setError('Please enter your name.');
-      return;
+    if (mode === 'register') {
+      if (!name.trim()) {
+        setError('Please enter your name.');
+        return;
+      }
+      if (password.length < 8) {
+        setError('Password must be at least 8 characters.');
+        return;
+      }
     }
+    Keyboard.dismiss();
     setError(null);
     setSubmitting(true);
     try {
@@ -47,10 +56,13 @@ export default function LoginScreen() {
       } else {
         await registerWithEmail(name.trim(), email.trim(), password);
       }
+      // On success, the root navigator picks up the new auth.me result and
+      // pushes /(app). We leave `submitting` true so the button keeps
+      // showing its spinner until the screen unmounts — feels less jumpy
+      // than the button flashing back to "Sign in" right before navigating.
     } catch (e: unknown) {
-      const message = e instanceof Error ? e.message : "Couldn't sign in.";
+      const message = friendlyAuthError(e, mode);
       setError(message);
-    } finally {
       setSubmitting(false);
     }
   };
@@ -201,6 +213,26 @@ export default function LoginScreen() {
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
+}
+
+// Map raw backend errors to language a user understands. The auth.login
+// procedure throws TRPCClientError with `data.code === "UNAUTHORIZED"` and
+// message "Invalid email or password" on bad creds; register throws
+// `code === "CONFLICT"` with "An account with this email already exists".
+// Everything else falls back to whatever message the server gave us, or a
+// generic message if the request never reached the server.
+function friendlyAuthError(e: unknown, mode: 'login' | 'register'): string {
+  const err = e as
+    | { message?: string; data?: { code?: string; httpStatus?: number } }
+    | undefined;
+  const code = err?.data?.code;
+  if (code === 'UNAUTHORIZED') return 'Email or password is incorrect.';
+  if (code === 'CONFLICT')
+    return 'An account with this email already exists. Try signing in.';
+  if (err?.message) return err.message;
+  return mode === 'login'
+    ? "Couldn't sign in. Check your connection and try again."
+    : "Couldn't create your account. Check your connection and try again.";
 }
 
 const styles = StyleSheet.create({
