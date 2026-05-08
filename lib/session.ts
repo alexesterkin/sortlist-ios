@@ -2,6 +2,19 @@ import * as SecureStore from 'expo-secure-store';
 
 const COOKIE_KEY = 'sortlist.session_cookie';
 
+// Must match the access group registered in plugins/with-shared-keychain.js
+// AND in app.json (`ios.entitlements.keychain-access-groups`). Both the main
+// app and the share extension target need this in their entitlements so the
+// cookie written here is visible across both processes.
+const KEYCHAIN_ACCESS_GROUP = 'com.alexesterkin.sortlist.shared';
+
+const secureStoreOptions: SecureStore.SecureStoreOptions = {
+  accessGroup: KEYCHAIN_ACCESS_GROUP,
+  // After-first-unlock so the share extension can read the cookie even when
+  // the device just rebooted but is unlocked.
+  keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK,
+};
+
 let cachedCookie: string | null = null;
 let loaded = false;
 
@@ -10,7 +23,7 @@ const listeners = new Set<(cookie: string | null) => void>();
 export async function loadSessionCookie(): Promise<string | null> {
   if (loaded) return cachedCookie;
   try {
-    cachedCookie = await SecureStore.getItemAsync(COOKIE_KEY);
+    cachedCookie = await SecureStore.getItemAsync(COOKIE_KEY, secureStoreOptions);
   } catch {
     cachedCookie = null;
   }
@@ -26,9 +39,9 @@ export async function setSessionCookie(cookie: string | null): Promise<void> {
   cachedCookie = cookie;
   loaded = true;
   if (cookie) {
-    await SecureStore.setItemAsync(COOKIE_KEY, cookie);
+    await SecureStore.setItemAsync(COOKIE_KEY, cookie, secureStoreOptions);
   } else {
-    await SecureStore.deleteItemAsync(COOKIE_KEY);
+    await SecureStore.deleteItemAsync(COOKIE_KEY, secureStoreOptions);
   }
   listeners.forEach((l) => l(cookie));
 }

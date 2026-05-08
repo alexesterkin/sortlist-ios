@@ -48,13 +48,32 @@ Google sign-in opens `/api/auth/google` in `expo-web-browser` and re-fetches
 
 ## Share extension
 
-When a user taps Share → Sortlist in Safari, `index.share.js` boots
-`ShareExtension.tsx`. The extension lets the user confirm/edit the URL, then
-calls `openHostApp("add?url=…")` which deep-links into the host app at
-`sortlist://add?url=…`. `lib/deep-link.ts` listens and routes to
-`/(app)/add`, which auto-fetches metadata and shows the save form.
+The share extension is **self-contained** — it never opens the host app to
+complete a save. When a user taps Share → Sortlist in Safari, the iOS share
+sheet boots `ShareExtension.tsx`, which:
 
-The extension currently activates on:
+1. Reads the JWT session cookie from the **shared keychain access group**
+   (`com.alexesterkin.sortlist.shared`) that the main app writes to at sign-in.
+2. Calls `auth.me` to confirm the session, then `meta.fetch(url)` to scrape
+   the product preview and `collections.list` to populate the dropdown — all
+   in parallel.
+3. Renders a popup sheet with image, title, price, a "Sort to" dropdown
+   (`✦ AI will sort this` / existing sortlists / `+ Create new sortlist`),
+   and a coral "Save to Sortlist" button.
+4. On Save → calls `products.add` directly. On success, dismisses the sheet
+   and the user returns to whatever app they were in. If the user picked
+   "AI will sort this", we send neither `collectionId` nor
+   `newCollectionName`, and the backend's AI auto-assigns a sortlist
+   (returning `aiSuggestion` in the response).
+
+If the user isn't signed in, the sheet shows a single CTA to open Sortlist;
+no save is attempted.
+
+The extension does **not** import tRPC or React Query — it talks to the
+backend with a tiny bare-fetch tRPC client (`share-extension/api.ts`) so the
+extension bundle stays small (iOS share extensions are memory-constrained).
+
+Activation rules:
 
 - `url` (Safari share)
 - `text` (any selected text — we extract the first URL)
@@ -115,3 +134,10 @@ eas build --profile development --platform ios
   typed permissively and procedure shapes are documented in `lib/types.ts`.
 - React Native's `fetch` doesn't fully manage cookies cross-request, so we
   capture `Set-Cookie` manually after each response and re-attach it.
+- The shared keychain entitlement is added by `plugins/with-shared-keychain.js`
+  (a custom config plugin). It must run AFTER `expo-share-extension` because
+  the share extension's `.entitlements` file is written by that plugin and we
+  patch it.
+- The shared keychain only works on real builds (dev client or release) — Expo
+  Go does not support custom entitlements. Sign-in done in Expo Go won't be
+  visible to the share extension.

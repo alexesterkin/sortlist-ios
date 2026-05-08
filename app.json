@@ -62,7 +62,7 @@
       [
         "expo-share-extension",
         {
-          "height": 480,
+          "height": 540,
           "backgroundColor": {
             "red": 250,
             "green": 248,
@@ -76,9 +76,14 @@
           "excludedPackages": [
             "expo-dev-client",
             "expo-splash-screen",
-            "expo-updates"
+            "expo-updates",
+            "expo-router"
           ]
         }
+      ],
+      [
+        "./plugins/with-shared-keychain.js",
+        { "accessGroup": "com.alexesterkin.sortlist.shared" }
       ]
     ],
     "experiments": {
