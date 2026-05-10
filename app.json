@@ -7,7 +7,7 @@
     "icon": "./assets/images/icon.png",
     "scheme": "sortlist",
     "userInterfaceStyle": "light",
-    "newArchEnabled": true,
+    "newArchEnabled": false,
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.alexesterkin.sortlist",
