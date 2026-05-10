@@ -87,7 +87,7 @@ export default function ForgotPasswordScreen() {
           <Button
             title="Back to sign in"
             variant="ghost"
-            onPress={() => router.back()}
+            onPress={() => router.replace('/(auth)/login' as never)}
           />
         </View>
       </KeyboardAvoidingView>

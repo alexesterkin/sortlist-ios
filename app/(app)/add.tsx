@@ -124,10 +124,23 @@ export default function AddProductScreen() {
 
     try {
       await addProduct.mutateAsync(payload);
-      router.back();
+      // Always replace to the sortlists home after a successful save —
+      // router.back() throws GO_BACK if this screen was the entry point
+      // (e.g. share-extension deep link, cold-start to this modal).
+      router.replace('/(app)' as never);
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : 'Could not save product.';
       Alert.alert("Couldn't save", message);
+    }
+  };
+
+  // Cancel: dismiss if there's something to dismiss, otherwise replace to
+  // home. Guards against GO_BACK if /add was the entry point.
+  const dismissOrHome = () => {
+    if (router.canGoBack()) {
+      router.back();
+    } else {
+      router.replace('/(app)' as never);
     }
   };
 
@@ -141,7 +154,7 @@ export default function AddProductScreen() {
           headerShadowVisible: false,
           headerTitleStyle: { color: Brand.ink, fontSize: 17 },
           headerLeft: () => (
-            <Pressable hitSlop={12} onPress={() => router.back()}>
+            <Pressable hitSlop={12} onPress={dismissOrHome}>
               <Text variant="body" color={Brand.ink}>
                 Cancel
               </Text>

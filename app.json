@@ -15,6 +15,11 @@
         "applinks:sortlist.shop",
         "applinks:www.sortlist.shop"
       ],
+      "entitlements": {
+        "keychain-access-groups": [
+          "$(AppIdentifierPrefix)com.alexesterkin.sortlist"
+        ]
+      },
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false
       }
@@ -80,10 +85,6 @@
             "expo-router"
           ]
         }
-      ],
-      [
-        "./plugins/with-shared-keychain.js",
-        { "accessGroup": "com.alexesterkin.sortlist.shared" }
       ]
     ],
     "experiments": {
