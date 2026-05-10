@@ -1,5 +1,4 @@
 import * as WebBrowser from 'expo-web-browser';
-import * as Linking from 'expo-linking';
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { Platform } from 'react-native';
 import { API_BASE_URL } from './config';
@@ -10,6 +9,9 @@ import {
 } from './session';
 import { trpc } from './trpc';
 import type { User } from './types';
+
+const NATIVE_REDIRECT_URI = 'sortlist://auth-callback';
+const SESSION_COOKIE_NAME = 'app_session_id';
 
 type AuthState = {
   user: User | null;
@@ -40,8 +42,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     void loadSessionCookie().then(() => setHydrated(true));
-    // Refetch the session whenever the cookie changes (e.g. after sign-in).
     return onSessionChange(() => {
+      // Cookie changed (e.g. after Google sign-in writes the JWT). Re-run
+      // auth.me so isAuthed flips and the route guard redirects.
       void me.refetch();
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -49,8 +52,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signInWithEmail = useCallback(
     async (email: string, password: string) => {
+      // Just call the mutation. tRPC throws TRPCClientError on non-2xx;
+      // the caller renders the message. On success, NSURLSession captures
+      // the Set-Cookie automatically (iOS) and we explicitly refetch
+      // auth.me so isAuthed flips immediately.
       await loginMutation.mutateAsync({ email, password });
-      await me.refetch();
+      const result = await me.refetch();
+      if (!result.data) {
+        throw new Error("Couldn't load your account after sign-in.");
+      }
     },
     [loginMutation, me],
   );
@@ -58,36 +68,70 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const registerWithEmail = useCallback(
     async (name: string, email: string, password: string) => {
       await registerMutation.mutateAsync({ name, email, password });
-      await me.refetch();
+      const result = await me.refetch();
+      if (!result.data) {
+        throw new Error("Couldn't load your account after sign-up.");
+      }
     },
     [registerMutation, me],
   );
 
   const signInWithGoogle = useCallback(async () => {
-    // Open the backend's Google OAuth flow in an in-app browser session.
-    // The backend redirects to a final URL on success; we close the browser
-    // when it returns to the app and then re-fetch the session cookie.
-    const startUrl = `${API_BASE_URL}/api/auth/google`;
     if (Platform.OS === 'web') {
-      // No-op fallback for web preview; real auth happens on device.
-      window.location.href = startUrl;
+      // No-op fallback on web — the iOS app is what we ship.
+      window.location.href = `${API_BASE_URL}/api/auth/google`;
       return;
     }
-    const returnUrl = Linking.createURL('auth-callback');
-    const result = await WebBrowser.openAuthSessionAsync(startUrl, returnUrl);
-    if (result.type !== 'success' && result.type !== 'dismiss') return;
-    // Whether or not the deep link returned, the backend may have set a
-    // cookie inside the in-app browser session. We rely on the
-    // platform's shared cookie store; tRPC requests will pick it up via
-    // credentials: 'include'. We also kick a /auth.me refetch.
-    await me.refetch();
+
+    const startUrl = new URL(`${API_BASE_URL}/api/auth/google`);
+    startUrl.searchParams.set('redirect_uri', NATIVE_REDIRECT_URI);
+
+    const result = await WebBrowser.openAuthSessionAsync(
+      startUrl.toString(),
+      NATIVE_REDIRECT_URI,
+    );
+
+    if (result.type === 'cancel' || result.type === 'dismiss') {
+      // User closed the sheet without completing — silently bail. No error
+      // to the caller, no state change.
+      return;
+    }
+    if (result.type !== 'success' || !result.url) {
+      throw new Error('Google sign-in did not complete.');
+    }
+
+    // The backend redirects to sortlist://auth-callback#token=<JWT> on success
+    // or sortlist://auth-callback#error=<reason> on failure. The token rides
+    // in the URL fragment so it isn't logged anywhere on the way.
+    const { token, error } = parseCallbackUrl(result.url);
+    if (error) {
+      throw new Error(
+        error === 'google_failed'
+          ? 'Google sign-in failed. Try again.'
+          : `Google sign-in error: ${error}`,
+      );
+    }
+    if (!token) {
+      throw new Error("Google sign-in didn't return a session.");
+    }
+
+    // Save the JWT as our cookie value. tRPC's cookieFetch attaches this on
+    // every subsequent request as `Cookie: app_session_id=<jwt>`. Goes into
+    // the shared keychain access group so the share extension sees it too.
+    await setSessionCookie(`${SESSION_COOKIE_NAME}=${token}`);
+
+    const refreshed = await me.refetch();
+    if (!refreshed.data) {
+      throw new Error("Couldn't load your account after Google sign-in.");
+    }
   }, [me]);
 
   const signOut = useCallback(async () => {
     try {
       await logoutMutation.mutateAsync();
     } catch {
-      // Even if the network call fails, clear local cookie.
+      // Even if the network call fails, clear the local cookie so the route
+      // guard redirects to /(auth)/login.
     }
     await setSessionCookie(null);
     await me.refetch();
@@ -103,7 +147,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     () => ({
       user,
       isAuthed: !!user,
-      isLoading: !hydrated || me.isLoading || me.isFetching,
+      // The `(auth)` and `(app)` layouts use isLoading to show a spinner
+      // instead of flashing the wrong screen during cold start.
+      isLoading: !hydrated || me.isLoading,
       signInWithEmail,
       registerWithEmail,
       signInWithGoogle,
@@ -114,7 +160,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       user,
       hydrated,
       me.isLoading,
-      me.isFetching,
       signInWithEmail,
       registerWithEmail,
       signInWithGoogle,
@@ -130,4 +175,26 @@ export function useAuth(): AuthState {
   const ctx = useContext(AuthContext);
   if (!ctx) throw new Error('useAuth must be used within AuthProvider');
   return ctx;
+}
+
+// Parse `sortlist://auth-callback#token=<jwt>` or `?token=<jwt>`. We accept
+// both because the OS may rewrite the fragment in some flows.
+function parseCallbackUrl(raw: string): { token?: string; error?: string } {
+  const out: { token?: string; error?: string } = {};
+  const hashIdx = raw.indexOf('#');
+  const queryIdx = raw.indexOf('?');
+  const segments: string[] = [];
+  if (hashIdx >= 0) segments.push(raw.slice(hashIdx + 1));
+  if (queryIdx >= 0) {
+    const end = hashIdx >= 0 ? hashIdx : raw.length;
+    segments.push(raw.slice(queryIdx + 1, end));
+  }
+  for (const seg of segments) {
+    for (const pair of seg.split('&')) {
+      const [k, v = ''] = pair.split('=');
+      if (k === 'token') out.token = decodeURIComponent(v);
+      else if (k === 'error') out.error = decodeURIComponent(v);
+    }
+  }
+  return out;
 }

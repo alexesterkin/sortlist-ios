@@ -1,5 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
-import { Link } from 'expo-router';
+import { Link, router } from 'expo-router';
 import { useState } from 'react';
 import {
   Alert,
@@ -19,6 +19,8 @@ import { Text } from '@/components/ui/text';
 import { Brand, Spacing } from '@/constants/theme';
 import { useAuth } from '@/lib/auth';
 
+const HOME_ROUTE = '/(app)';
+
 export default function LoginScreen() {
   const insets = useSafeAreaInsets();
   const { signInWithEmail, registerWithEmail, signInWithGoogle } = useAuth();
@@ -30,6 +32,13 @@ export default function LoginScreen() {
   const [submitting, setSubmitting] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Navigate to the sortlists home directly. Never call router.back() — on
+  // a fresh launch there's nothing to go back to, and expo-router would
+  // throw GO_BACK.
+  const goHome = () => {
+    router.replace(HOME_ROUTE as never);
+  };
 
   const submit = async () => {
     if (submitting) return;
@@ -56,23 +65,24 @@ export default function LoginScreen() {
       } else {
         await registerWithEmail(name.trim(), email.trim(), password);
       }
-      // On success, the root navigator picks up the new auth.me result and
-      // pushes /(app). We leave `submitting` true so the button keeps
-      // showing its spinner until the screen unmounts — feels less jumpy
-      // than the button flashing back to "Sign in" right before navigating.
+      goHome();
     } catch (e: unknown) {
-      const message = friendlyAuthError(e, mode);
-      setError(message);
+      setError(friendlyAuthError(e, mode));
       setSubmitting(false);
     }
   };
 
   const onGoogle = async () => {
+    if (googleLoading) return;
+    setError(null);
     setGoogleLoading(true);
     try {
       await signInWithGoogle();
+      goHome();
     } catch (e: unknown) {
-      const message = e instanceof Error ? e.message : 'Google sign-in failed.';
+      const message =
+        e instanceof Error ? e.message : 'Google sign-in failed.';
+      setError(message);
       Alert.alert('Sign in', message);
     } finally {
       setGoogleLoading(false);
@@ -94,12 +104,8 @@ export default function LoginScreen() {
           <View style={styles.brand}>
             <View style={styles.logoMark}>
               <View style={styles.logoBar} />
-              <View
-                style={[styles.logoBar, { width: 18, opacity: 0.85 }]}
-              />
-              <View
-                style={[styles.logoBar, { width: 12, opacity: 0.7 }]}
-              />
+              <View style={[styles.logoBar, { width: 18, opacity: 0.85 }]} />
+              <View style={[styles.logoBar, { width: 12, opacity: 0.7 }]} />
             </View>
             <Text variant="display" style={styles.wordmark}>
               Sortlist
@@ -162,7 +168,7 @@ export default function LoginScreen() {
             ) : null}
 
             {mode === 'login' ? (
-              <Link href="/(auth)/forgot" asChild>
+              <Link href={'/(auth)/forgot' as never} asChild>
                 <Pressable style={styles.forgotLink} hitSlop={8}>
                   <Text variant="caption" color={Brand.coral}>
                     Forgot password?
@@ -215,12 +221,6 @@ export default function LoginScreen() {
   );
 }
 
-// Map raw backend errors to language a user understands. The auth.login
-// procedure throws TRPCClientError with `data.code === "UNAUTHORIZED"` and
-// message "Invalid email or password" on bad creds; register throws
-// `code === "CONFLICT"` with "An account with this email already exists".
-// Everything else falls back to whatever message the server gave us, or a
-// generic message if the request never reached the server.
 function friendlyAuthError(e: unknown, mode: 'login' | 'register'): string {
   const err = e as
     | { message?: string; data?: { code?: string; httpStatus?: number } }
