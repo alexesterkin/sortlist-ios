@@ -85,7 +85,8 @@
             "expo-router"
           ]
         }
-      ]
+      ],
+      "./plugins/with-share-extension-exclude-pods.js"
     ],
     "experiments": {
       "typedRoutes": false,
