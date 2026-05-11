@@ -87,7 +87,8 @@
         }
       ],
       "./plugins/with-share-extension-exclude-pods.js",
-      "./plugins/with-disable-head-module.js"
+      "./plugins/with-disable-head-module.js",
+      "./plugins/withModularHeaders"
     ],
     "experiments": {
       "typedRoutes": false,
