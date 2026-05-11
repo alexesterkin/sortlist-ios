@@ -49,6 +49,14 @@ const SHARE_AUTOLINK_LINE = /\n  config = use_native_modules!\(config_command\)/
 
 function buildReplacement() {
   const list = SHARE_EXTENSION_EXCLUDED.map((n) => `'${n}'`).join(', ');
+  // Heredoc-style: build the Ruby block we'll splice into the Podfile.
+  //
+  // Critical: do NOT execute `config_command` via backticks or `sh -c`.
+  // The community-autolinking branch of `config_command` is
+  //   ['node', '-e', "process.argv=['', '', 'config']; require(...).run()"]
+  // and the `-e` arg contains quotes, semicolons, and parens — none of
+  // which survive shell interpretation. `IO.popen(array, &:read)` spawns
+  // the process directly via argv, bypassing the shell entirely.
   return `
   ${MARKER}
   # Strip nav / safe-area pods from the share-extension autolink so they
@@ -56,7 +64,10 @@ function buildReplacement() {
   require 'json'
   require 'tempfile'
   _excluded_for_share = [${list}]
-  _config_json = \`#{config_command.join(' ')}\`
+  _config_json = IO.popen(config_command, &:read)
+  unless $?.success?
+    raise "share-extension autolink command failed: #{config_command.inspect}"
+  end
   _parsed = JSON.parse(_config_json)
   if _parsed['dependencies']
     _excluded_for_share.each { |name| _parsed['dependencies'].delete(name) }
@@ -64,6 +75,8 @@ function buildReplacement() {
   _tmp = Tempfile.new(['share_ext_config', '.json'])
   _tmp.write(_parsed.to_json)
   _tmp.close
+  # use_native_modules! re-invokes its arg through a shell, but ['cat', tmpfile]
+  # is shell-safe (tempfile paths have no spaces or metacharacters).
   config = use_native_modules!(['cat', _tmp.path])`;
 }
 
