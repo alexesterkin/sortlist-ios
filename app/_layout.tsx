@@ -4,7 +4,7 @@ import { Stack } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect } from 'react';
-import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { View } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { ErrorBoundary } from '@/components/error-boundary';
@@ -66,7 +66,13 @@ export default function RootLayout() {
 
   return (
     <ErrorBoundary>
-      <GestureHandlerRootView style={{ flex: 1, backgroundColor: Brand.cream }}>
+      {/* This used to be GestureHandlerRootView from
+          react-native-gesture-handler; gesture-handler was removed
+          because its New Arch codegen on SDK 55 was failing pod
+          install. The app uses TouchableOpacity / Pressable from RN
+          core for taps and doesn't register any gesture handlers, so
+          a plain View is a functionally identical replacement. */}
+      <View style={{ flex: 1, backgroundColor: Brand.cream }}>
         <SafeAreaProvider>
           <AppProviders>
             <ThemeProvider value={SortlistTheme}>
@@ -85,7 +91,7 @@ export default function RootLayout() {
             </ThemeProvider>
           </AppProviders>
         </SafeAreaProvider>
-      </GestureHandlerRootView>
+      </View>
     </ErrorBoundary>
   );
 }

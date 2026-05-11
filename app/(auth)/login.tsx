@@ -7,11 +7,11 @@ import {
   KeyboardAvoidingView,
   Platform,
   Pressable,
+  ScrollView,
   StyleSheet,
   View,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import { ScrollView } from 'react-native-gesture-handler';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
