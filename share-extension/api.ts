@@ -4,22 +4,17 @@
 // share extension bundle stays small — extensions are memory-constrained.
 // Wire format: tRPC v11 + superjson on the backend.
 //
-// Query  (GET):  /api/trpc/<proc>?input={"json": <input>}
-// Mutation (POST): /api/trpc/<proc>  body: {"json": <input>}
-//
-// The response envelope is one of:
-//   { result: { data: { json: <output>, meta?: ... } } }
-//   { error:  { json:  { message, code, data: { code, httpStatus } } } }
-//
-// We rely on the iOS keychain (shared via keychain-access-groups) to give us
-// the same JWT cookie the main app stored at sign-in. We always send it as
-// a Cookie header and refresh it from any Set-Cookie response.
+// Auth: the backend accepts either `Cookie: app_session_id=<jwt>` or
+// `Authorization: Bearer <jwt>`. We attach both on every request — Cookie
+// matches the web app's path; Bearer is what the iOS app actually relies
+// on because RN's fetch can't read Set-Cookie response headers.
 
 import {
-  getSessionCookie,
-  loadSessionCookie,
+  getSessionToken,
+  loadSessionToken,
   parseSetCookieToCookieHeader,
-  setSessionCookie,
+  SESSION_COOKIE_NAME,
+  setSessionToken,
 } from '@/lib/session';
 
 const TRPC_BASE = 'https://www.sortlist.shop/api/trpc';
@@ -39,13 +34,16 @@ async function call(
   input: unknown,
   method: 'GET' | 'POST',
 ): Promise<unknown> {
-  await loadSessionCookie();
-  const cookie = getSessionCookie();
+  await loadSessionToken();
+  const token = getSessionToken();
 
   const headers: Record<string, string> = {
     Accept: 'application/json',
   };
-  if (cookie) headers['Cookie'] = cookie;
+  if (token) {
+    headers['Cookie'] = `${SESSION_COOKIE_NAME}=${token}`;
+    headers['Authorization'] = `Bearer ${token}`;
+  }
 
   let url = `${TRPC_BASE}/${procedure}`;
   let body: string | undefined;
@@ -76,12 +74,24 @@ async function call(
     getSetCookie?: () => string[];
     get(name: string): string | null;
   };
+  // Best-effort Set-Cookie capture — no-op on iOS RN (forbidden response
+  // header) but harmless elsewhere. We extract just the app_session_id
+  // value and store it as a plain token.
   const setCookie = headersAny.getSetCookie
     ? headersAny.getSetCookie().join(', ')
     : headersAny.get('set-cookie');
   if (setCookie) {
     const parsed = parseSetCookieToCookieHeader(setCookie);
-    if (parsed) await setSessionCookie(parsed);
+    if (parsed) {
+      const match = parsed
+        .split(';')
+        .map((s) => s.trim())
+        .find((p) => p.startsWith(`${SESSION_COOKIE_NAME}=`));
+      if (match) {
+        const jwt = match.slice(SESSION_COOKIE_NAME.length + 1);
+        if (jwt) await setSessionToken(jwt);
+      }
+    }
   }
 
   let payload: { result?: { data?: { json?: unknown } }; error?: { json?: { message?: string; data?: { code?: string; httpStatus?: number } } } };

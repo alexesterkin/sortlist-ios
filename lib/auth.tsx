@@ -3,15 +3,14 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState } 
 import { Platform } from 'react-native';
 import { API_BASE_URL } from './config';
 import {
-  loadSessionCookie,
+  loadSessionToken,
   onSessionChange,
-  setSessionCookie,
+  setSessionToken,
 } from './session';
 import { trpc } from './trpc';
 import type { User } from './types';
 
 const NATIVE_REDIRECT_URI = 'sortlist://auth-callback';
-const SESSION_COOKIE_NAME = 'app_session_id';
 
 // CORS note: React Native's fetch on iOS isn't bound by the browser CORS
 // model — no preflight, no Origin enforcement. CORS can't be the cause
@@ -62,13 +61,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const logoutMutation = trpc.auth.logout.useMutation();
 
   useEffect(() => {
-    log('hydrating: loading session cookie from AsyncStorage');
-    void loadSessionCookie().then((c) => {
-      log('hydrated: cookie present?', !!c);
+    log('hydrating: loading session token from AsyncStorage');
+    void loadSessionToken().then((t) => {
+      log('hydrated: token present?', !!t);
       setHydrated(true);
     });
-    return onSessionChange((c) => {
-      log('session cookie changed externally; cookie present?', !!c);
+    return onSessionChange((t) => {
+      log('session token changed externally; token present?', !!t);
       void me.refetch();
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -93,8 +92,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         );
         return;
       }
-      log('storing JWT (length', token.length, ') in AsyncStorage');
-      await setSessionCookie(`${SESSION_COOKIE_NAME}=${token}`);
+      log('storing JWT (length', token.length, ') as plain token');
+      await setSessionToken(token);
     },
     [],
   );
@@ -186,7 +185,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
 
     log('signInWithGoogle: storing JWT (length', token.length, ')');
-    await setSessionCookie(`${SESSION_COOKIE_NAME}=${token}`);
+    await setSessionToken(token);
 
     log('signInWithGoogle: refetching auth.me');
     const refreshed = await me.refetch();
@@ -203,7 +202,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } catch (e) {
       warn('signOut: auth.logout failed (ignoring):', describeError(e));
     }
-    await setSessionCookie(null);
+    await setSessionToken(null);
     await me.refetch();
   }, [logoutMutation, me]);
 

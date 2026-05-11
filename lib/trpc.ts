@@ -2,9 +2,10 @@ import { createTRPCReact, httpBatchLink } from '@trpc/react-query';
 import superjson from 'superjson';
 import { TRPC_URL } from './config';
 import {
-  getSessionCookie,
+  getSessionToken,
   parseSetCookieToCookieHeader,
-  setSessionCookie,
+  SESSION_COOKIE_NAME,
+  setSessionToken,
 } from './session';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -21,18 +22,13 @@ export const trpc = trpcReact as unknown as {
   useUtils: () => any;
 };
 
-// Toggle off when we're confident the auth flow is solid in production.
-// In a preview build this prints one line per tRPC request, which is
-// invaluable for tracing "auth.me returned null" type failures via
-// xcrun simctl spawn booted log stream or the Devices and Simulators
-// log viewer.
 const DEBUG_TRPC = true;
 
-function logRequest(url: string, hasCookie: boolean) {
+function logRequest(url: string, sentCookie: boolean, sentBearer: boolean) {
   if (!DEBUG_TRPC) return;
   // eslint-disable-next-line no-console
   console.log(
-    `[Sortlist tRPC] -> ${shortenUrl(url)} | cookie attached: ${hasCookie}`,
+    `[Sortlist tRPC] -> ${shortenUrl(url)} | Cookie: ${sentCookie ? 'yes' : 'no'} | Bearer: ${sentBearer ? 'yes' : 'no'}`,
   );
 }
 
@@ -45,19 +41,26 @@ function logResponse(url: string, status: number, snippet: string) {
 }
 
 function shortenUrl(url: string): string {
-  // /api/trpc/auth.me?batch=1&input=...  -> auth.me
   const m = url.match(/\/api\/trpc\/([^?]+)/);
   return m ? m[1] : url;
 }
 
 const cookieFetch: typeof fetch = async (input, init) => {
-  const cookie = getSessionCookie();
+  const token = getSessionToken();
   const headers = new Headers(init?.headers);
-  if (cookie) headers.set('Cookie', cookie);
+
+  // Attach BOTH transports. Cookie is what the web app uses; Authorization
+  // is the iOS path. Backend (authenticateRequest in
+  // server/_core/auth.ts) accepts either — cookie wins when both are
+  // present, but it costs nothing to send both.
+  if (token) {
+    headers.set('Cookie', `${SESSION_COOKIE_NAME}=${token}`);
+    headers.set('Authorization', `Bearer ${token}`);
+  }
 
   const reqUrl =
     typeof input === 'string' ? input : (input as Request).url ?? String(input);
-  logRequest(reqUrl, !!cookie);
+  logRequest(reqUrl, !!token, !!token);
 
   const res = await fetch(input as RequestInfo, {
     ...init,
@@ -65,14 +68,12 @@ const cookieFetch: typeof fetch = async (input, init) => {
     credentials: 'include',
   });
 
-  // iOS RN fetch can't read Set-Cookie response headers (it's listed as a
-  // forbidden response header in the fetch spec, and the polyfill honors
-  // that). NSURLSession does stash the cookie internally, but auto-
-  // attachment to follow-up requests has proven unreliable. The auth
-  // mutations now also return the token in the response body, so we
-  // capture it from there — see lib/auth.tsx. This block stays as a
-  // best-effort second path: on platforms / runtimes where Set-Cookie
-  // *is* readable, we still grab it.
+  // Best-effort Set-Cookie capture for platforms where the response
+  // header IS readable. On iOS RN this is a no-op (Set-Cookie is in
+  // the fetch spec's forbidden response header list), but we keep the
+  // path for robustness. The actual JWT capture for iOS happens in
+  // lib/auth.tsx by reading the `token` field from the login/register
+  // response body.
   const headersAny = res.headers as unknown as {
     getSetCookie?: () => string[];
     get(name: string): string | null;
@@ -83,13 +84,18 @@ const cookieFetch: typeof fetch = async (input, init) => {
   if (setCookie) {
     const parsed = parseSetCookieToCookieHeader(setCookie);
     if (parsed) {
-      const merged = mergeCookies(getSessionCookie(), parsed);
-      void setSessionCookie(merged);
+      // Extract just our cookie's value from the parsed name=value;... string
+      const match = parsed
+        .split(';')
+        .map((s) => s.trim())
+        .find((p) => p.startsWith(`${SESSION_COOKIE_NAME}=`));
+      if (match) {
+        const jwt = match.slice(SESSION_COOKIE_NAME.length + 1);
+        if (jwt) void setSessionToken(jwt);
+      }
     }
   }
 
-  // Snapshot the body for the diagnostic log without consuming the
-  // stream the caller will read. clone() is cheap.
   if (DEBUG_TRPC) {
     try {
       const clone = res.clone();
@@ -104,25 +110,8 @@ const cookieFetch: typeof fetch = async (input, init) => {
 };
 
 function snippet(body: string): string {
-  // First 200 chars, single line.
   const oneLine = body.replace(/\s+/g, ' ').trim();
   return oneLine.length > 200 ? oneLine.slice(0, 200) + '…' : oneLine;
-}
-
-function mergeCookies(existing: string | null, incoming: string): string {
-  const map = new Map<string, string>();
-  for (const piece of [existing ?? '', incoming]) {
-    for (const part of piece.split(';')) {
-      const trimmed = part.trim();
-      if (!trimmed) continue;
-      const eq = trimmed.indexOf('=');
-      if (eq <= 0) continue;
-      map.set(trimmed.slice(0, eq), trimmed.slice(eq + 1));
-    }
-  }
-  return Array.from(map.entries())
-    .map(([k, v]) => `${k}=${v}`)
-    .join('; ');
 }
 
 export function makeTRPCClient() {
