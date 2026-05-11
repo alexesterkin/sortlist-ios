@@ -200,7 +200,14 @@ export default function ShareExtension(props: InitialProps) {
   };
 
   const goToApp = () => {
-    void openHostApp('');
+    // openHostApp(path) opens sortlist://<path>. Pass 'login' so the
+    // host app's auth-gated route guard lands directly on the sign-in
+    // screen instead of flashing some other route first. Once the user
+    // signs in there, the JWT gets written to the shared keychain
+    // (lib/session.ts via SecureStore + plugins/with-share-extension-
+    // keychain.js) and a subsequent share will see it without any deep
+    // link plumbing.
+    void openHostApp('login');
     close();
   };
 

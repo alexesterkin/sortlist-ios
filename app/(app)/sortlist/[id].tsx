@@ -17,16 +17,21 @@ import { Brand, Spacing, coverColorFor } from '@/constants/theme';
 import { trpc } from '@/lib/trpc';
 import type { Collection, Product } from '@/lib/types';
 
+type AiPick = { title: string; reason: string; searchUrl: string };
+
 export default function SortlistDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const collectionId = Number(id);
   const [refreshing, setRefreshing] = useState(false);
+  const [picks, setPicks] = useState<AiPick[] | null>(null);
+  const [picksError, setPicksError] = useState<string | null>(null);
 
   const collectionsQuery = trpc.collections.list.useQuery();
   const productsQuery = trpc.products.list.useQuery({
     collectionId,
     status: 'all',
   });
+  const aiPicksMutation = trpc.products.aiPicks.useMutation();
 
   const collection = useMemo(() => {
     const list = (collectionsQuery.data ?? []) as Collection[];
@@ -39,6 +44,36 @@ export default function SortlistDetailScreen() {
     setRefreshing(true);
     await Promise.all([collectionsQuery.refetch(), productsQuery.refetch()]);
     setRefreshing(false);
+  };
+
+  const onPickFor = async () => {
+    if (aiPicksMutation.isPending) return;
+    setPicksError(null);
+    try {
+      const result = (await aiPicksMutation.mutateAsync({ collectionId })) as {
+        picks?: AiPick[];
+      };
+      const list = result?.picks ?? [];
+      setPicks(list);
+      if (list.length === 0) {
+        setPicksError(
+          products.length === 0
+            ? 'Add a product to this sortlist first, then try AI Picks.'
+            : "Couldn't generate suggestions right now. Try again in a moment.",
+        );
+      }
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : 'AI Picks failed.';
+      setPicksError(message);
+    }
+  };
+
+  const openSearch = async (url: string) => {
+    await WebBrowser.openBrowserAsync(url, {
+      controlsColor: Brand.coral,
+      toolbarColor: Brand.cream,
+      dismissButtonStyle: 'done',
+    });
   };
 
   const isLoading = productsQuery.isLoading && !refreshing;
@@ -87,6 +122,14 @@ export default function SortlistDetailScreen() {
             <Text variant="caption">
               {products.length} {products.length === 1 ? 'item' : 'items'}
             </Text>
+
+            <AiPicksSection
+              picks={picks}
+              error={picksError}
+              loading={aiPicksMutation.isPending}
+              onRun={onPickFor}
+              onOpenSearch={openSearch}
+            />
           </View>
         }
         ListEmptyComponent={
@@ -114,6 +157,79 @@ export default function SortlistDetailScreen() {
           />
         }
       />
+    </View>
+  );
+}
+
+function AiPicksSection({
+  picks,
+  error,
+  loading,
+  onRun,
+  onOpenSearch,
+}: {
+  picks: AiPick[] | null;
+  error: string | null;
+  loading: boolean;
+  onRun: () => void;
+  onOpenSearch: (url: string) => void;
+}) {
+  const hasPicks = picks !== null && picks.length > 0;
+  return (
+    <View style={styles.aiSection}>
+      <Pressable
+        onPress={onRun}
+        disabled={loading}
+        style={({ pressed }) => [
+          styles.aiButton,
+          pressed && !loading && { opacity: 0.85 },
+          loading && { opacity: 0.7 },
+        ]}>
+        {loading ? (
+          <ActivityIndicator color={Brand.coral} size="small" />
+        ) : (
+          <Text variant="body" color={Brand.coral} style={styles.aiButtonLabel}>
+            ✦  {hasPicks ? 'Refresh AI Picks' : 'AI Picks'}
+          </Text>
+        )}
+      </Pressable>
+
+      {hasPicks ? (
+        <View style={styles.aiResults}>
+          {picks!.map((pick, i) => (
+            <Pressable
+              key={`${pick.title}-${i}`}
+              onPress={() => onOpenSearch(pick.searchUrl)}
+              style={({ pressed }) => [
+                styles.aiCard,
+                pressed && { opacity: 0.9 },
+              ]}>
+              <View style={styles.aiCardBody}>
+                <Text variant="subtitle" numberOfLines={2}>
+                  {pick.title}
+                </Text>
+                {pick.reason ? (
+                  <Text variant="caption" style={styles.aiReason} numberOfLines={2}>
+                    {pick.reason}
+                  </Text>
+                ) : null}
+                <View style={styles.aiCardFoot}>
+                  <Ionicons name="search-outline" size={14} color={Brand.coral} />
+                  <Text variant="caption" color={Brand.coral} style={{ fontSize: 12 }}>
+                    Search to buy
+                  </Text>
+                </View>
+              </View>
+            </Pressable>
+          ))}
+        </View>
+      ) : null}
+
+      {error ? (
+        <Text variant="caption" color={Brand.inkMuted} style={styles.aiHint}>
+          {error}
+        </Text>
+      ) : null}
     </View>
   );
 }
@@ -257,5 +373,54 @@ const styles = StyleSheet.create({
   empty: {
     paddingTop: Spacing.xxl,
     alignItems: 'center',
+  },
+
+  aiSection: {
+    marginTop: Spacing.lg,
+    gap: Spacing.md,
+  },
+  aiButton: {
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 999,
+    backgroundColor: '#fff',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: Brand.coral,
+    minHeight: 36,
+  },
+  aiButtonLabel: {
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  aiResults: {
+    gap: Spacing.sm,
+  },
+  aiCard: {
+    flexDirection: 'row',
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: Brand.line,
+    padding: Spacing.md,
+  },
+  aiCardBody: {
+    flex: 1,
+    gap: 4,
+  },
+  aiReason: {
+    marginTop: 2,
+    color: Brand.inkMuted,
+  },
+  aiCardFoot: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: Spacing.sm,
+  },
+  aiHint: {
+    fontStyle: 'italic',
   },
 });

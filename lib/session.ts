@@ -1,50 +1,117 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as SecureStore from 'expo-secure-store';
 
-// We persist the JWT itself, as a plain string, rather than a
-// `app_session_id=<jwt>` cookie blob like we did in earlier iterations.
-// The cookieFetch in lib/trpc.ts formats both the Cookie and the
-// Authorization header from this raw value on every request.
+// JWT session storage.
 //
-// Why AsyncStorage and not SecureStore: SecureStore needs the
-// keychain-access-groups entitlement properly applied to the build,
-// which has been flaky in development. AsyncStorage works in every
-// build with no entitlement plumbing. iOS file protection still
-// guards the JWT while the device is locked.
-const TOKEN_KEY = 'sortlist.session_token';
+// Primary store: expo-secure-store with a shared keychain access group.
+// Both the main app's entitlements (declared via `ios.entitlements` in
+// app.json) and the share extension's entitlements (patched by
+// plugins/with-share-extension-keychain.js) list the same access group,
+// so the share extension can read the JWT the main app wrote at sign-in.
+// This is the ONLY mechanism on iOS that survives cross-target without
+// shipping a native module — AsyncStorage is sandboxed per target.
+//
+// Fallback store: AsyncStorage. Used when SecureStore throws (e.g. dev
+// builds where the entitlement didn't get applied, simulators where the
+// access group is unavailable). The main app keeps working either way;
+// the share extension only sees the token via SecureStore.
 
-// Legacy key from earlier iterations where we stored
-// `app_session_id=<jwt>`. We migrate-on-read so users who already
-// installed an older preview build don't have to sign in again.
-const LEGACY_COOKIE_KEY = 'sortlist.session_cookie';
+const ACCESS_GROUP = 'com.alexesterkin.sortlist';
+const TOKEN_KEY = 'sortlist.session_token';
+const LEGACY_COOKIE_KEY = 'sortlist.session_cookie'; // pre-rename users
 const COOKIE_NAME = 'app_session_id';
+
+const secureOpts: SecureStore.SecureStoreOptions = {
+  accessGroup: ACCESS_GROUP,
+  // Read after first device unlock so the share extension can hit it
+  // even when the device just rebooted and the user hasn't opened the
+  // app yet — as long as the device is unlocked.
+  keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK,
+};
+
+export const SESSION_COOKIE_NAME = COOKIE_NAME;
 
 let cachedToken: string | null = null;
 let loaded = false;
-
 const listeners = new Set<(token: string | null) => void>();
 
-export const SESSION_COOKIE_NAME = COOKIE_NAME;
+async function readSecure(): Promise<string | null> {
+  try {
+    return await SecureStore.getItemAsync(TOKEN_KEY, secureOpts);
+  } catch {
+    return null;
+  }
+}
+
+async function writeSecure(token: string | null): Promise<void> {
+  try {
+    if (token) {
+      await SecureStore.setItemAsync(TOKEN_KEY, token, secureOpts);
+    } else {
+      await SecureStore.deleteItemAsync(TOKEN_KEY, secureOpts);
+    }
+  } catch {
+    // SecureStore unavailable (no entitlement, simulator quirk, etc).
+    // Not fatal — AsyncStorage still has the value as a fallback.
+  }
+}
+
+async function readAsync(): Promise<string | null> {
+  try {
+    const raw = await AsyncStorage.getItem(TOKEN_KEY);
+    if (raw) return raw;
+    // Migrate the legacy `app_session_id=<jwt>`-blob entry if present.
+    const legacy = await AsyncStorage.getItem(LEGACY_COOKIE_KEY);
+    if (!legacy) return null;
+    const eq = legacy.indexOf('=');
+    const migrated =
+      eq > 0 && legacy.slice(0, eq).trim() === COOKIE_NAME
+        ? legacy.slice(eq + 1).trim()
+        : legacy.trim();
+    if (migrated) {
+      await AsyncStorage.setItem(TOKEN_KEY, migrated);
+      await AsyncStorage.removeItem(LEGACY_COOKIE_KEY);
+      return migrated;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeAsync(token: string | null): Promise<void> {
+  try {
+    if (token) {
+      await AsyncStorage.setItem(TOKEN_KEY, token);
+    } else {
+      await AsyncStorage.removeItem(TOKEN_KEY);
+      await AsyncStorage.removeItem(LEGACY_COOKIE_KEY);
+    }
+  } catch {
+    // ignore — the in-memory cache still holds the value
+  }
+}
 
 export async function loadSessionToken(): Promise<string | null> {
   if (loaded) return cachedToken;
 
-  try {
-    const raw = await AsyncStorage.getItem(TOKEN_KEY);
-    if (raw) {
-      cachedToken = raw;
-    } else {
-      // Try to migrate the legacy key.
-      const legacy = await AsyncStorage.getItem(LEGACY_COOKIE_KEY);
-      if (legacy) {
-        cachedToken = stripCookiePrefix(legacy);
-        if (cachedToken) {
-          await AsyncStorage.setItem(TOKEN_KEY, cachedToken);
-          await AsyncStorage.removeItem(LEGACY_COOKIE_KEY);
-        }
-      }
+  // Try the shared keychain first. If it has a value, prefer it (the
+  // share extension may have refreshed it since the main app last
+  // wrote, or vice versa).
+  const fromSecure = await readSecure();
+  if (fromSecure) {
+    cachedToken = fromSecure;
+    // Mirror to AsyncStorage so the fallback path also has a fresh
+    // value on next launch.
+    await writeAsync(fromSecure);
+  } else {
+    // Otherwise fall back to AsyncStorage. If we find a value there,
+    // push it into SecureStore so the share extension can see it too.
+    const fromAsync = await readAsync();
+    cachedToken = fromAsync;
+    if (fromAsync) {
+      await writeSecure(fromAsync);
     }
-  } catch {
-    cachedToken = null;
   }
 
   loaded = true;
@@ -58,17 +125,9 @@ export function getSessionToken(): string | null {
 export async function setSessionToken(token: string | null): Promise<void> {
   cachedToken = token;
   loaded = true;
-  try {
-    if (token) {
-      await AsyncStorage.setItem(TOKEN_KEY, token);
-    } else {
-      await AsyncStorage.removeItem(TOKEN_KEY);
-      await AsyncStorage.removeItem(LEGACY_COOKIE_KEY);
-    }
-  } catch {
-    // If the disk write fails the in-memory value is still set, so the
-    // current session keeps working — we'll just lose it on next launch.
-  }
+  // Write to BOTH stores. SecureStore is what makes the token visible
+  // to the share extension; AsyncStorage is the always-works backup.
+  await Promise.all([writeSecure(token), writeAsync(token)]);
   listeners.forEach((l) => l(token));
 }
 
@@ -79,11 +138,10 @@ export function onSessionChange(cb: (token: string | null) => void): () => void 
   };
 }
 
-// ─── Compatibility shims ─────────────────────────────────────────────────────
-// Older callers used `getSessionCookie` / `setSessionCookie` / `loadSessionCookie`
-// and passed an `app_session_id=<jwt>` blob. We keep those exports working so
-// nothing else in the tree has to change in lockstep — they just route through
-// the new plain-token store.
+// ─── Compatibility shims (cookie-shaped API) ────────────────────────────────
+// Older call sites referred to a "cookie" of the form `app_session_id=<jwt>`.
+// We keep the cookie-named exports working so callers can migrate at their
+// own pace — they route through the new plain-token store.
 
 export const loadSessionCookie = loadSessionToken;
 
@@ -97,27 +155,16 @@ export async function setSessionCookie(cookie: string | null): Promise<void> {
     await setSessionToken(null);
     return;
   }
-  const token = stripCookiePrefix(cookie) ?? cookie;
-  await setSessionToken(token);
+  const eq = cookie.indexOf('=');
+  const token =
+    eq > 0 && cookie.slice(0, eq).trim() === COOKIE_NAME
+      ? cookie.slice(eq + 1).trim()
+      : cookie.trim();
+  await setSessionToken(token || null);
 }
 
-function stripCookiePrefix(value: string): string | null {
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  // Accept either a bare JWT or a Cookie-style "name=value" blob.
-  const eqIdx = trimmed.indexOf('=');
-  if (eqIdx === -1) return trimmed;
-  const name = trimmed.slice(0, eqIdx).trim();
-  if (name === COOKIE_NAME) {
-    return trimmed.slice(eqIdx + 1).trim() || null;
-  }
-  // Otherwise return as-is and let the caller deal with it.
-  return trimmed;
-}
-
-// Kept for the trpc.ts cookieFetch's Set-Cookie capture path on
-// platforms / runtimes where the response header IS readable. We
-// rarely hit this on iOS but it costs nothing to leave intact.
+// Used by cookieFetch's Set-Cookie capture path on platforms / runtimes
+// where the response header IS readable.
 export function parseSetCookieToCookieHeader(setCookieHeader: string | null): string | null {
   if (!setCookieHeader) return null;
   const parts = setCookieHeader.split(/,(?=\s*[A-Za-z0-9_\-]+=)/);
