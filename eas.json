@@ -8,7 +8,7 @@
       "developmentClient": true,
       "distribution": "internal",
       "ios": {
-        "image": "macos-sequoia-15.2-xcode-16.2"
+        "image": "macos-sequoia-15.3-xcode-16.2"
       }
     },
     "preview": {
@@ -17,7 +17,7 @@
         "EXPO_PUBLIC_APP_VARIANT": "preview"
       },
       "ios": {
-        "image": "macos-sequoia-15.2-xcode-16.2",
+        "image": "macos-sequoia-15.3-xcode-16.2",
         "buildConfiguration": "Release"
       }
     },
@@ -27,7 +27,7 @@
         "EXPO_PUBLIC_APP_VARIANT": "production"
       },
       "ios": {
-        "image": "macos-sequoia-15.2-xcode-16.2"
+        "image": "macos-sequoia-15.3-xcode-16.2"
       }
     }
   },
