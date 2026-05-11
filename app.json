@@ -58,7 +58,15 @@
         }
       ],
       "expo-image",
-      "./plugins/with-native-share-extension.js"
+      "./plugins/with-native-share-extension.js",
+      [
+        "expo-build-properties",
+        {
+          "ios": {
+            "newArchEnabled": false
+          }
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": false
