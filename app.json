@@ -17,6 +17,9 @@
       "entitlements": {
         "keychain-access-groups": [
           "$(AppIdentifierPrefix)com.alexesterkin.sortlist"
+        ],
+        "com.apple.security.application-groups": [
+          "group.com.alexesterkin.sortlist"
         ]
       },
       "infoPlist": {
@@ -53,37 +56,8 @@
           }
         }
       ],
-      [
-        "expo-share-extension",
-        {
-          "height": 540,
-          "backgroundColor": {
-            "red": 250,
-            "green": 248,
-            "blue": 243,
-            "alpha": 1
-          },
-          "activationRules": [
-            {
-              "type": "url",
-              "max": 1
-            },
-            {
-              "type": "text"
-            }
-          ],
-          "excludedPackages": [
-            "expo-dev-client",
-            "expo-splash-screen",
-            "expo-updates",
-            "expo-router"
-          ]
-        }
-      ],
-      "./plugins/with-share-extension-exclude-pods.js",
-      "./plugins/with-disable-head-module.js",
-      "./plugins/with-share-extension-keychain.js",
-      "expo-image"
+      "expo-image",
+      "./plugins/with-native-share-extension.js"
     ],
     "experiments": {
       "typedRoutes": false
