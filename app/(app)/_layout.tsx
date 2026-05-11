@@ -25,6 +25,9 @@ export default function AppLayout() {
     return <Redirect href={'/(auth)/login' as never} />;
   }
 
+  // Outer Stack hosts the modal-style routes (Add Product, Sortlist Detail)
+  // and the (tabs) group, which renders the bottom tab bar for the four
+  // main destinations.
   return (
     <Stack
       screenOptions={{
@@ -34,7 +37,7 @@ export default function AppLayout() {
         headerShadowVisible: false,
         contentStyle: { backgroundColor: Brand.cream },
       }}>
-      <Stack.Screen name="index" options={{ headerShown: false }} />
+      <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
       <Stack.Screen name="sortlist/[id]" options={{ headerShown: false }} />
       <Stack.Screen
         name="add"

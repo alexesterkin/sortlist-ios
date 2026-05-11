@@ -61,18 +61,22 @@ export const Colors = {
   },
 };
 
+// Font family names line up with what
+// @expo-google-fonts/instrument-serif exports.
+// useFonts({ InstrumentSerif_400Regular, InstrumentSerif_400Regular_Italic })
+// in app/_layout.tsx registers these names with the iOS font system.
 export const Fonts = Platform.select({
   ios: {
     sans: 'system-ui',
-    serif: 'InstrumentSerif',
-    serifItalic: 'InstrumentSerif-Italic',
+    serif: 'InstrumentSerif_400Regular',
+    serifItalic: 'InstrumentSerif_400Regular_Italic',
     rounded: 'ui-rounded',
     mono: 'ui-monospace',
   },
   default: {
     sans: 'normal',
-    serif: 'InstrumentSerif',
-    serifItalic: 'InstrumentSerif-Italic',
+    serif: 'InstrumentSerif_400Regular',
+    serifItalic: 'InstrumentSerif_400Regular_Italic',
     rounded: 'normal',
     mono: 'monospace',
   },

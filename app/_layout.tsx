@@ -1,5 +1,9 @@
+import {
+  InstrumentSerif_400Regular,
+  InstrumentSerif_400Regular_Italic,
+  useFonts,
+} from '@expo-google-fonts/instrument-serif';
 import { DefaultTheme, ThemeProvider } from '@react-navigation/native';
-import { useFonts } from 'expo-font';
 import { Stack } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
@@ -36,9 +40,16 @@ const SortlistTheme = {
 };
 
 export default function RootLayout() {
+  // Load Instrument Serif via @expo-google-fonts. The two font family names
+  // we'll reference in styles (constants/theme.ts -> Fonts.serif and
+  // Fonts.serifItalic) match exactly what this package registers:
+  //   InstrumentSerif_400Regular
+  //   InstrumentSerif_400Regular_Italic
+  // We hold the splash screen until both have hydrated so the first paint
+  // already has the right typography — no FOUT into the brand wordmark.
   const [loaded, error] = useFonts({
-    InstrumentSerif: require('../assets/fonts/InstrumentSerif-Regular.ttf'),
-    'InstrumentSerif-Italic': require('../assets/fonts/InstrumentSerif-Italic.ttf'),
+    InstrumentSerif_400Regular,
+    InstrumentSerif_400Regular_Italic,
   });
 
   useEffect(() => {

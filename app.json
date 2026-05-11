@@ -42,15 +42,6 @@
       "expo-secure-store",
       "expo-web-browser",
       [
-        "expo-font",
-        {
-          "fonts": [
-            "./assets/fonts/InstrumentSerif-Regular.ttf",
-            "./assets/fonts/InstrumentSerif-Italic.ttf"
-          ]
-        }
-      ],
-      [
         "expo-splash-screen",
         {
           "image": "./assets/images/splash-icon.png",
