@@ -13,6 +13,15 @@ import type { User } from './types';
 const NATIVE_REDIRECT_URI = 'sortlist://auth-callback';
 const SESSION_COOKIE_NAME = 'app_session_id';
 
+// CORS note: React Native's fetch on iOS isn't bound by the browser CORS
+// model — no preflight, no Origin enforcement. CORS can't be the cause
+// of an auth failure here. The cookie problem is unrelated: it's that
+// the fetch spec lists "set-cookie" as a forbidden response header, and
+// RN's polyfill honors that, so `response.headers.get('set-cookie')`
+// always returns null on iOS even though NSURLSession sees the header
+// fine. The backend now also returns the JWT in the response body
+// (`token` field on login / register) so we can attach it manually.
+
 type AuthState = {
   user: User | null;
   isLoading: boolean;
@@ -25,6 +34,18 @@ type AuthState = {
 };
 
 const AuthContext = createContext<AuthState | null>(null);
+
+// Light wrappers around console so every auth-flow log line has the
+// same prefix and shows up grouped in `xcrun simctl spawn booted log
+// stream` filtered on the app process.
+const log = (...args: unknown[]) => {
+  // eslint-disable-next-line no-console
+  console.log('[Sortlist Auth]', ...args);
+};
+const warn = (...args: unknown[]) => {
+  // eslint-disable-next-line no-console
+  console.warn('[Sortlist Auth]', ...args);
+};
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [hydrated, setHydrated] = useState(false);
@@ -41,69 +62,118 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const logoutMutation = trpc.auth.logout.useMutation();
 
   useEffect(() => {
-    void loadSessionCookie().then(() => setHydrated(true));
-    return onSessionChange(() => {
-      // Cookie changed (e.g. after Google sign-in writes the JWT). Re-run
-      // auth.me so isAuthed flips and the route guard redirects.
+    log('hydrating: loading session cookie from AsyncStorage');
+    void loadSessionCookie().then((c) => {
+      log('hydrated: cookie present?', !!c);
+      setHydrated(true);
+    });
+    return onSessionChange((c) => {
+      log('session cookie changed externally; cookie present?', !!c);
       void me.refetch();
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const storeTokenFromMutationResult = useCallback(
+    async (result: unknown) => {
+      // The backend now returns { success: true, token: "<jwt>" } on login
+      // and register. Extract the token and store it as a cookie pair so
+      // tRPC's cookieFetch attaches it on every subsequent request.
+      const token =
+        typeof result === 'object' &&
+        result !== null &&
+        'token' in result &&
+        typeof (result as { token: unknown }).token === 'string'
+          ? (result as { token: string }).token
+          : null;
+      if (!token) {
+        warn(
+          'response did not include a token field; falling back to ' +
+            'NSURLSession auto-cookie (unreliable on iOS production builds)',
+        );
+        return;
+      }
+      log('storing JWT (length', token.length, ') in AsyncStorage');
+      await setSessionCookie(`${SESSION_COOKIE_NAME}=${token}`);
+    },
+    [],
+  );
+
   const signInWithEmail = useCallback(
     async (email: string, password: string) => {
-      // Just call the mutation. tRPC throws TRPCClientError on non-2xx;
-      // the caller renders the message. On success, NSURLSession captures
-      // the Set-Cookie automatically (iOS) and we explicitly refetch
-      // auth.me so isAuthed flips immediately.
-      await loginMutation.mutateAsync({ email, password });
-      const result = await me.refetch();
-      if (!result.data) {
-        throw new Error("Couldn't load your account after sign-in.");
+      log('signInWithEmail: calling auth.login for', maskEmail(email));
+      try {
+        const result = await loginMutation.mutateAsync({ email, password });
+        log('signInWithEmail: auth.login success', summarizeResult(result));
+        await storeTokenFromMutationResult(result);
+      } catch (e) {
+        warn('signInWithEmail: auth.login error', describeError(e));
+        throw e;
+      }
+
+      log('signInWithEmail: refetching auth.me');
+      const refreshed = await me.refetch();
+      log(
+        'signInWithEmail: auth.me result —',
+        refreshed.error ? `error: ${describeError(refreshed.error)}` : 'no error',
+        'data:',
+        refreshed.data ? '(user)' : refreshed.data,
+      );
+      if (!refreshed.data) {
+        throw new Error(
+          buildLoadFailureMessage('signInWithEmail', refreshed),
+        );
       }
     },
-    [loginMutation, me],
+    [loginMutation, me, storeTokenFromMutationResult],
   );
 
   const registerWithEmail = useCallback(
     async (name: string, email: string, password: string) => {
-      await registerMutation.mutateAsync({ name, email, password });
-      const result = await me.refetch();
-      if (!result.data) {
-        throw new Error("Couldn't load your account after sign-up.");
+      log('registerWithEmail: calling auth.register for', maskEmail(email));
+      try {
+        const result = await registerMutation.mutateAsync({ name, email, password });
+        log('registerWithEmail: auth.register success', summarizeResult(result));
+        await storeTokenFromMutationResult(result);
+      } catch (e) {
+        warn('registerWithEmail: auth.register error', describeError(e));
+        throw e;
+      }
+
+      log('registerWithEmail: refetching auth.me');
+      const refreshed = await me.refetch();
+      if (!refreshed.data) {
+        throw new Error(buildLoadFailureMessage('registerWithEmail', refreshed));
       }
     },
-    [registerMutation, me],
+    [registerMutation, me, storeTokenFromMutationResult],
   );
 
   const signInWithGoogle = useCallback(async () => {
     if (Platform.OS === 'web') {
-      // No-op fallback on web — the iOS app is what we ship.
       window.location.href = `${API_BASE_URL}/api/auth/google`;
       return;
     }
 
     const startUrl = new URL(`${API_BASE_URL}/api/auth/google`);
     startUrl.searchParams.set('redirect_uri', NATIVE_REDIRECT_URI);
+    log('signInWithGoogle: opening', startUrl.toString());
 
     const result = await WebBrowser.openAuthSessionAsync(
       startUrl.toString(),
       NATIVE_REDIRECT_URI,
     );
+    log('signInWithGoogle: auth session result type =', result.type);
 
     if (result.type === 'cancel' || result.type === 'dismiss') {
-      // User closed the sheet without completing — silently bail. No error
-      // to the caller, no state change.
       return;
     }
     if (result.type !== 'success' || !result.url) {
       throw new Error('Google sign-in did not complete.');
     }
 
-    // The backend redirects to sortlist://auth-callback#token=<JWT> on success
-    // or sortlist://auth-callback#error=<reason> on failure. The token rides
-    // in the URL fragment so it isn't logged anywhere on the way.
     const { token, error } = parseCallbackUrl(result.url);
+    log('signInWithGoogle: parsed callback — token?', !!token, 'error?', error ?? null);
     if (error) {
       throw new Error(
         error === 'google_failed'
@@ -115,23 +185,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       throw new Error("Google sign-in didn't return a session.");
     }
 
-    // Save the JWT as our cookie value. tRPC's cookieFetch attaches this on
-    // every subsequent request as `Cookie: app_session_id=<jwt>`. Goes into
-    // the shared keychain access group so the share extension sees it too.
+    log('signInWithGoogle: storing JWT (length', token.length, ')');
     await setSessionCookie(`${SESSION_COOKIE_NAME}=${token}`);
 
+    log('signInWithGoogle: refetching auth.me');
     const refreshed = await me.refetch();
     if (!refreshed.data) {
-      throw new Error("Couldn't load your account after Google sign-in.");
+      throw new Error(buildLoadFailureMessage('signInWithGoogle', refreshed));
     }
+    log('signInWithGoogle: success, user loaded');
   }, [me]);
 
   const signOut = useCallback(async () => {
+    log('signOut: calling auth.logout + clearing local cookie');
     try {
       await logoutMutation.mutateAsync();
-    } catch {
-      // Even if the network call fails, clear the local cookie so the route
-      // guard redirects to /(auth)/login.
+    } catch (e) {
+      warn('signOut: auth.logout failed (ignoring):', describeError(e));
     }
     await setSessionCookie(null);
     await me.refetch();
@@ -147,8 +217,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     () => ({
       user,
       isAuthed: !!user,
-      // The `(auth)` and `(app)` layouts use isLoading to show a spinner
-      // instead of flashing the wrong screen during cold start.
       isLoading: !hydrated || me.isLoading,
       signInWithEmail,
       registerWithEmail,
@@ -177,8 +245,6 @@ export function useAuth(): AuthState {
   return ctx;
 }
 
-// Parse `sortlist://auth-callback#token=<jwt>` or `?token=<jwt>`. We accept
-// both because the OS may rewrite the fragment in some flows.
 function parseCallbackUrl(raw: string): { token?: string; error?: string } {
   const out: { token?: string; error?: string } = {};
   const hashIdx = raw.indexOf('#');
@@ -197,4 +263,41 @@ function parseCallbackUrl(raw: string): { token?: string; error?: string } {
     }
   }
   return out;
+}
+
+function maskEmail(email: string): string {
+  const [name = '', domain = ''] = email.split('@');
+  if (!name || !domain) return '<bad-email>';
+  return `${name.slice(0, 2)}***@${domain}`;
+}
+
+function summarizeResult(result: unknown): string {
+  if (typeof result !== 'object' || result === null) return String(result);
+  const r = result as Record<string, unknown>;
+  const hasToken = typeof r.token === 'string' && (r.token as string).length > 0;
+  return `keys=${Object.keys(r).join(',')} token=${hasToken ? 'present' : 'MISSING'}`;
+}
+
+function describeError(e: unknown): string {
+  if (!e) return 'null';
+  const err = e as {
+    message?: string;
+    data?: { code?: string; httpStatus?: number };
+    shape?: { message?: string };
+  };
+  const code = err?.data?.code ?? '';
+  const status = err?.data?.httpStatus ?? '';
+  const msg = err?.message ?? err?.shape?.message ?? String(e);
+  return [code, status, msg].filter(Boolean).join(' / ');
+}
+
+function buildLoadFailureMessage(
+  source: string,
+  refetched: { data?: unknown; error?: unknown },
+): string {
+  const hint = refetched.error
+    ? ` (server: ${describeError(refetched.error)})`
+    : ' (auth.me returned null — JWT cookie not attached?)';
+  warn(`${source}: load failure${hint}`);
+  return `Couldn't load your account after sign-in.${hint}`;
 }

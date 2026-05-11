@@ -7,14 +7,9 @@ import {
   setSessionCookie,
 } from './session';
 
-// We don't import a generated AppRouter type from the backend repo, so we
-// expose tRPC's React hooks as `any`. This keeps call sites concise (e.g.
-// `trpc.auth.login.useMutation(...)`) without fighting tRPC v11's strict
-// router-shape inference.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const trpcReact = createTRPCReact<any>();
 
-// Cast to a permissive type so deeply-nested proxy access type-checks.
 export const trpc = trpcReact as unknown as {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   [key: string]: any;
@@ -26,19 +21,58 @@ export const trpc = trpcReact as unknown as {
   useUtils: () => any;
 };
 
+// Toggle off when we're confident the auth flow is solid in production.
+// In a preview build this prints one line per tRPC request, which is
+// invaluable for tracing "auth.me returned null" type failures via
+// xcrun simctl spawn booted log stream or the Devices and Simulators
+// log viewer.
+const DEBUG_TRPC = true;
+
+function logRequest(url: string, hasCookie: boolean) {
+  if (!DEBUG_TRPC) return;
+  // eslint-disable-next-line no-console
+  console.log(
+    `[Sortlist tRPC] -> ${shortenUrl(url)} | cookie attached: ${hasCookie}`,
+  );
+}
+
+function logResponse(url: string, status: number, snippet: string) {
+  if (!DEBUG_TRPC) return;
+  // eslint-disable-next-line no-console
+  console.log(
+    `[Sortlist tRPC] <- ${shortenUrl(url)} | ${status} | ${snippet}`,
+  );
+}
+
+function shortenUrl(url: string): string {
+  // /api/trpc/auth.me?batch=1&input=...  -> auth.me
+  const m = url.match(/\/api\/trpc\/([^?]+)/);
+  return m ? m[1] : url;
+}
+
 const cookieFetch: typeof fetch = async (input, init) => {
   const cookie = getSessionCookie();
   const headers = new Headers(init?.headers);
   if (cookie) headers.set('Cookie', cookie);
+
+  const reqUrl =
+    typeof input === 'string' ? input : (input as Request).url ?? String(input);
+  logRequest(reqUrl, !!cookie);
+
   const res = await fetch(input as RequestInfo, {
     ...init,
     headers,
     credentials: 'include',
   });
 
-  // Capture Set-Cookie from the response and persist it so subsequent
-  // requests carry the JWT cookie. React Native's fetch joins multiple
-  // Set-Cookie values with commas; newer runtimes expose getSetCookie().
+  // iOS RN fetch can't read Set-Cookie response headers (it's listed as a
+  // forbidden response header in the fetch spec, and the polyfill honors
+  // that). NSURLSession does stash the cookie internally, but auto-
+  // attachment to follow-up requests has proven unreliable. The auth
+  // mutations now also return the token in the response body, so we
+  // capture it from there — see lib/auth.tsx. This block stays as a
+  // best-effort second path: on platforms / runtimes where Set-Cookie
+  // *is* readable, we still grab it.
   const headersAny = res.headers as unknown as {
     getSetCookie?: () => string[];
     get(name: string): string | null;
@@ -46,7 +80,6 @@ const cookieFetch: typeof fetch = async (input, init) => {
   const setCookie = headersAny.getSetCookie
     ? headersAny.getSetCookie().join(', ')
     : headersAny.get('set-cookie');
-
   if (setCookie) {
     const parsed = parseSetCookieToCookieHeader(setCookie);
     if (parsed) {
@@ -54,8 +87,27 @@ const cookieFetch: typeof fetch = async (input, init) => {
       void setSessionCookie(merged);
     }
   }
+
+  // Snapshot the body for the diagnostic log without consuming the
+  // stream the caller will read. clone() is cheap.
+  if (DEBUG_TRPC) {
+    try {
+      const clone = res.clone();
+      const text = await clone.text();
+      logResponse(reqUrl, res.status, snippet(text));
+    } catch {
+      logResponse(reqUrl, res.status, '<could not read body>');
+    }
+  }
+
   return res;
 };
+
+function snippet(body: string): string {
+  // First 200 chars, single line.
+  const oneLine = body.replace(/\s+/g, ' ').trim();
+  return oneLine.length > 200 ? oneLine.slice(0, 200) + '…' : oneLine;
+}
 
 function mergeCookies(existing: string | null, incoming: string): string {
   const map = new Map<string, string>();
