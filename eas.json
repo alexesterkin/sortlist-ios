@@ -6,7 +6,11 @@
   "build": {
     "development": {
       "developmentClient": true,
-      "distribution": "internal"
+      "distribution": "internal",
+      "ios": {
+        "image": "macos-sequoia-15.2-xcode-16.2",
+        "appleTeamId": "REPLACE_WITH_APPLE_TEAM_ID"
+      }
     },
     "preview": {
       "distribution": "internal",
@@ -14,6 +18,8 @@
         "EXPO_PUBLIC_APP_VARIANT": "preview"
       },
       "ios": {
+        "image": "macos-sequoia-15.2-xcode-16.2",
+        "appleTeamId": "REPLACE_WITH_APPLE_TEAM_ID",
         "buildConfiguration": "Release"
       }
     },
@@ -21,6 +27,10 @@
       "autoIncrement": true,
       "env": {
         "EXPO_PUBLIC_APP_VARIANT": "production"
+      },
+      "ios": {
+        "image": "macos-sequoia-15.2-xcode-16.2",
+        "appleTeamId": "REPLACE_WITH_APPLE_TEAM_ID"
       }
     }
   },

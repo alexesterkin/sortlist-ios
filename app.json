@@ -10,6 +10,7 @@
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.alexesterkin.sortlist",
+      "appleTeamId": "REPLACE_WITH_APPLE_TEAM_ID",
       "associatedDomains": [
         "applinks:sortlist.shop",
         "applinks:www.sortlist.shop"
