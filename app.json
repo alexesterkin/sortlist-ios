@@ -75,7 +75,19 @@
     "extra": {
       "router": {},
       "eas": {
-        "projectId": "edb058b6-8512-424c-bb56-e65474134ba5"
+        "projectId": "edb058b6-8512-424c-bb56-e65474134ba5",
+        "build": {
+          "experimental": {
+            "ios": {
+              "appExtensions": [
+                {
+                  "targetName": "SortlistShareExtension",
+                  "bundleIdentifier": "com.alexesterkin.sortlist.ShareExtension"
+                }
+              ]
+            }
+          }
+        }
       }
     }
   }

@@ -1,17 +1,7 @@
 {
   "cli": {
-    "version": ">= 18.11.0",
+    "version": ">= 14.5.0",
     "appVersionSource": "remote"
-  },
-  "experimental": {
-    "ios": {
-      "appExtensions": [
-        {
-          "targetName": "SortlistShareExtension",
-          "bundleIdentifier": "com.alexesterkin.sortlist.ShareExtension"
-        }
-      ]
-    }
   },
   "build": {
     "development": {
@@ -19,7 +9,6 @@
       "distribution": "internal",
       "node": "20.19.4",
       "ios": {
-        "bundleIdentifier": "com.alexesterkin.sortlist",
         "image": "macos-sequoia-15.5-xcode-26.0"
       }
     },
@@ -30,7 +19,6 @@
         "EXPO_PUBLIC_APP_VARIANT": "preview"
       },
       "ios": {
-        "bundleIdentifier": "com.alexesterkin.sortlist",
         "image": "macos-sequoia-15.5-xcode-26.0",
         "buildConfiguration": "Release"
       }
@@ -42,7 +30,6 @@
         "EXPO_PUBLIC_APP_VARIANT": "production"
       },
       "ios": {
-        "bundleIdentifier": "com.alexesterkin.sortlist",
         "image": "macos-sequoia-15.5-xcode-26.0"
       }
     }
