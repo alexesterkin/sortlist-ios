@@ -1,3 +1,24 @@
+/**
+ * Sortlist share extension — minimal, self-contained.
+ *
+ * Strict primitive budget:
+ *   - From react-native: View, Text*, Image, TouchableOpacity, ActivityIndicator
+ *     (no Modal, no Pressable, no ScrollView, no nav libs)
+ *   - From expo-share-extension: close, openHostApp, Text, TextInput
+ *   - Storage: AsyncStorage (via lib/session indirectly through share-extension/api)
+ *   - HTTP: fetch (via share-extension/api)
+ *
+ * *We use expo-share-extension's Text + TextInput rather than RN core's,
+ *  because the upstream RN versions have a font-scaling bug inside
+ *  extensions. Same API surface, no nav deps.
+ *
+ * Layout uses two top-level states:
+ *   - picker closed: header / product preview / dropdown trigger / save
+ *   - picker open:   header / list of sort options (overrides the above)
+ *
+ * This avoids needing Modal or ScrollView while still feeling like a
+ * native two-step sheet.
+ */
 import {
   close,
   openHostApp,
@@ -9,10 +30,8 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Image,
-  Modal,
-  Pressable,
-  ScrollView,
   StyleSheet,
+  TouchableOpacity,
   View,
 } from 'react-native';
 
@@ -24,8 +43,8 @@ import {
   type MetaFetchResult,
 } from './share-extension/api';
 
-// Inlined brand tokens — we don't import from @/constants to keep the share
-// extension bundle independent of the rest of the app.
+// Brand tokens are inlined so this component depends on nothing in the
+// main app's import graph.
 const Brand = {
   coral: '#FF5B3A',
   coralDark: '#E04A2A',
@@ -49,6 +68,11 @@ type Status =
   | { kind: 'ready' }
   | { kind: 'saving' }
   | { kind: 'error'; message: string };
+
+// Cap the visible sortlists in the picker so we never overflow the sheet
+// height (we have no ScrollView). Power users with more sortlists can
+// open the host app to see the rest.
+const MAX_VISIBLE_SORTLISTS = 6;
 
 export default function ShareExtension(props: InitialProps) {
   const incomingUrl = useMemo(
@@ -101,7 +125,6 @@ export default function ShareExtension(props: InitialProps) {
         return;
       }
 
-      // Auth OK — fetch preview + sortlists in parallel.
       const [metaRes, listRes] = await Promise.allSettled([
         api.metaFetch(incomingUrl),
         api.collectionsList(),
@@ -112,7 +135,6 @@ export default function ShareExtension(props: InitialProps) {
         setMeta(metaRes.value);
       } else {
         const err = metaRes.reason;
-        // Fall back to a stub so the user can still save with just the URL.
         setMeta({
           title: '',
           imageUrl: '',
@@ -164,8 +186,7 @@ export default function ShareExtension(props: InitialProps) {
 
     try {
       await api.productsAdd(payload);
-      // Brief success blip then dismiss back to the source app.
-      setStatus({ kind: 'ready' });
+      // Done — dismiss the sheet. User returns to Safari (or wherever they shared from).
       close();
     } catch (e) {
       const message =
@@ -188,86 +209,95 @@ export default function ShareExtension(props: InitialProps) {
       <Header onCancel={close} />
 
       {status.kind === 'loading' ? (
-        <Centered>
+        <View style={styles.centered}>
           <ActivityIndicator color={Brand.coral} />
           <Text style={styles.dimText} allowFontScaling={false}>
             Reading product…
           </Text>
-        </Centered>
-      ) : status.kind === 'unauthed' ? (
-        <UnauthedState onOpenApp={goToApp} />
-      ) : (
-        <View style={{ flex: 1 }}>
-          <ScrollView
-            keyboardShouldPersistTaps="handled"
-            contentContainerStyle={styles.body}>
-              {meta ? (
-                <ProductPreview meta={meta} />
-              ) : null}
-              <SortChoiceRow
-                choice={choice}
-                collections={collections}
-                onPress={() => setPickerOpen(true)}
-              />
-              {choice === NEW_OPTION ? (
-                <View>
-                  <Text style={styles.label} allowFontScaling={false}>
-                    Sortlist name
-                  </Text>
-                  <TextInput
-                    value={newSortlistName}
-                    onChangeText={setNewSortlistName}
-                    placeholder="e.g. Living room"
-                    placeholderTextColor={Brand.inkMuted}
-                    style={styles.input}
-                    allowFontScaling={false}
-                    autoCapitalize="sentences"
-                  />
-                </View>
-              ) : null}
-              {meta?.blocked_message ? (
-                <Text style={styles.warn} allowFontScaling={false}>
-                  {meta.blocked_message}
-                </Text>
-              ) : null}
-              {status.kind === 'error' ? (
-                <Text style={styles.error} allowFontScaling={false}>
-                  {status.message}
-                </Text>
-              ) : null}
-          </ScrollView>
+        </View>
+      ) : null}
 
-          <View style={styles.actions}>
-            <Pressable
+      {status.kind === 'unauthed' ? (
+        <UnauthedState onOpenApp={goToApp} />
+      ) : null}
+
+      {(status.kind === 'ready' ||
+        status.kind === 'saving' ||
+        status.kind === 'error') && meta ? (
+        pickerOpen ? (
+          // Picker open: full list of sort options replaces the preview.
+          <PickerList
+            collections={collections}
+            selected={choice}
+            onSelect={(c) => {
+              setChoice(c);
+              setPickerOpen(false);
+            }}
+            onOpenApp={goToApp}
+          />
+        ) : (
+          // Picker closed: product preview + dropdown trigger + save.
+          <View style={styles.body}>
+            <ProductPreview meta={meta} />
+
+            <View style={styles.section}>
+              <Text style={styles.label} allowFontScaling={false}>
+                Sort to
+              </Text>
+              <TouchableOpacity
+                activeOpacity={0.7}
+                onPress={() => setPickerOpen(true)}
+                style={styles.dropdown}>
+                <Text style={styles.dropdownText} allowFontScaling={false}>
+                  {labelFor(choice, collections)}
+                </Text>
+                <Text style={styles.dropdownChevron} allowFontScaling={false}>
+                  ▾
+                </Text>
+              </TouchableOpacity>
+              {choice === NEW_OPTION ? (
+                <TextInput
+                  value={newSortlistName}
+                  onChangeText={setNewSortlistName}
+                  placeholder="New sortlist name"
+                  placeholderTextColor={Brand.inkMuted}
+                  style={styles.input}
+                  allowFontScaling={false}
+                  autoCapitalize="sentences"
+                />
+              ) : null}
+            </View>
+
+            {meta.blocked_message ? (
+              <Text style={styles.warn} allowFontScaling={false}>
+                {meta.blocked_message}
+              </Text>
+            ) : null}
+            {status.kind === 'error' ? (
+              <Text style={styles.errorText} allowFontScaling={false}>
+                {status.message}
+              </Text>
+            ) : null}
+
+            <TouchableOpacity
+              activeOpacity={0.85}
               onPress={onSave}
               disabled={status.kind === 'saving'}
-              style={({ pressed }) => [
+              style={[
                 styles.saveBtn,
-                pressed && { backgroundColor: Brand.coralDark },
                 status.kind === 'saving' && { opacity: 0.7 },
               ]}>
               {status.kind === 'saving' ? (
                 <ActivityIndicator color={Brand.white} />
               ) : (
                 <Text style={styles.saveBtnText} allowFontScaling={false}>
-                  Save to Sortlist
+                  Add to Sortlist
                 </Text>
               )}
-            </Pressable>
+            </TouchableOpacity>
           </View>
-        </View>
-      )}
-
-      <SortChoicePicker
-        visible={pickerOpen}
-        collections={collections}
-        selected={choice}
-        onSelect={(c) => {
-          setChoice(c);
-          setPickerOpen(false);
-        }}
-        onClose={() => setPickerOpen(false)}
-      />
+        )
+      ) : null}
     </View>
   );
 }
@@ -275,12 +305,12 @@ export default function ShareExtension(props: InitialProps) {
 function Header({ onCancel }: { onCancel: () => void }) {
   return (
     <View style={styles.header}>
-      <View style={{ width: 56 }}>
-        <Pressable onPress={onCancel} hitSlop={10}>
+      <View style={styles.headerSlot}>
+        <TouchableOpacity onPress={onCancel} activeOpacity={0.6}>
           <Text style={styles.headerCancel} allowFontScaling={false}>
             Cancel
           </Text>
-        </Pressable>
+        </TouchableOpacity>
       </View>
       <View style={styles.headerCenter}>
         <View style={styles.brandDot} />
@@ -288,7 +318,7 @@ function Header({ onCancel }: { onCancel: () => void }) {
           Sortlist
         </Text>
       </View>
-      <View style={{ width: 56 }} />
+      <View style={styles.headerSlot} />
     </View>
   );
 }
@@ -313,7 +343,10 @@ function ProductPreview({ meta }: { meta: MetaFetchResult }) {
       </View>
       <View style={styles.previewBody}>
         {meta.brand || meta.siteName ? (
-          <Text style={styles.previewBrand} allowFontScaling={false} numberOfLines={1}>
+          <Text
+            style={styles.previewBrand}
+            allowFontScaling={false}
+            numberOfLines={1}>
             {(meta.brand || meta.siteName || '').toUpperCase()}
           </Text>
         ) : null}
@@ -333,108 +366,91 @@ function ProductPreview({ meta }: { meta: MetaFetchResult }) {
   );
 }
 
-function SortChoiceRow({
-  choice,
+function PickerList({
   collections,
-  onPress,
+  selected,
+  onSelect,
+  onOpenApp,
 }: {
-  choice: SortChoice;
   collections: Collection[];
-  onPress: () => void;
+  selected: SortChoice;
+  onSelect: (c: SortChoice) => void;
+  onOpenApp: () => void;
 }) {
-  const label = labelFor(choice, collections);
+  // Show the first MAX_VISIBLE_SORTLISTS — beyond that, the user has to
+  // either pick AI / Create new, or open the full app. No ScrollView in
+  // the share extension by design.
+  const visible = collections.slice(0, MAX_VISIBLE_SORTLISTS);
+  const hidden = Math.max(0, collections.length - visible.length);
+
   return (
-    <View>
+    <View style={styles.body}>
       <Text style={styles.label} allowFontScaling={false}>
         Sort to
       </Text>
-      <Pressable
-        onPress={onPress}
-        style={({ pressed }) => [
-          styles.dropdown,
-          pressed && { backgroundColor: Brand.creamSoft },
-        ]}>
-        <Text style={styles.dropdownText} allowFontScaling={false} numberOfLines={1}>
-          {label}
-        </Text>
-        <Text style={styles.dropdownChevron} allowFontScaling={false}>
-          ▾
-        </Text>
-      </Pressable>
+
+      <PickerRow
+        label="✦  AI will sort this"
+        active={selected === AI_OPTION}
+        onPress={() => onSelect(AI_OPTION)}
+      />
+
+      {visible.map((c) => (
+        <PickerRow
+          key={c.id}
+          label={c.name}
+          active={selected === c.id}
+          onPress={() => onSelect(c.id)}
+        />
+      ))}
+
+      {hidden > 0 ? (
+        <TouchableOpacity
+          activeOpacity={0.7}
+          onPress={onOpenApp}
+          style={styles.pickerOverflowRow}>
+          <Text style={styles.pickerOverflowText} allowFontScaling={false}>
+            + {hidden} more sortlists — open Sortlist to see all
+          </Text>
+        </TouchableOpacity>
+      ) : null}
+
+      <PickerRow
+        label="+  Create new sortlist"
+        active={selected === NEW_OPTION}
+        onPress={() => onSelect(NEW_OPTION)}
+      />
     </View>
   );
 }
 
-function SortChoicePicker({
-  visible,
-  collections,
-  selected,
-  onSelect,
-  onClose,
+function PickerRow({
+  label,
+  active,
+  onPress,
 }: {
-  visible: boolean;
-  collections: Collection[];
-  selected: SortChoice;
-  onSelect: (c: SortChoice) => void;
-  onClose: () => void;
+  label: string;
+  active: boolean;
+  onPress: () => void;
 }) {
-  const items: { key: string; label: string; value: SortChoice }[] = [
-    { key: 'ai', label: '✦  AI will sort this', value: AI_OPTION },
-    ...collections.map((c) => ({
-      key: `c${c.id}`,
-      label: c.name,
-      value: c.id as SortChoice,
-    })),
-    { key: 'new', label: '+  Create new sortlist', value: NEW_OPTION },
-  ];
-
   return (
-    <Modal
-      visible={visible}
-      transparent
-      animationType="fade"
-      onRequestClose={onClose}>
-      <Pressable style={styles.modalBackdrop} onPress={onClose}>
-        <Pressable style={styles.modalCard} onPress={() => {}}>
-          <Text style={styles.modalTitle} allowFontScaling={false}>
-            Sort to
-          </Text>
-          <ScrollView style={{ maxHeight: 300 }}>
-            {items.map((item) => {
-              const active =
-                (item.value === AI_OPTION && selected === AI_OPTION) ||
-                (item.value === NEW_OPTION && selected === NEW_OPTION) ||
-                (typeof item.value === 'number' && item.value === selected);
-              return (
-                <Pressable
-                  key={item.key}
-                  onPress={() => onSelect(item.value)}
-                  style={({ pressed }) => [
-                    styles.modalRow,
-                    pressed && { backgroundColor: Brand.creamSoft },
-                    active && { backgroundColor: Brand.creamSoft },
-                  ]}>
-                  <Text
-                    style={[
-                      styles.modalRowText,
-                      active && { color: Brand.coral, fontWeight: '600' },
-                    ]}
-                    allowFontScaling={false}>
-                    {item.label}
-                  </Text>
-                </Pressable>
-              );
-            })}
-          </ScrollView>
-        </Pressable>
-      </Pressable>
-    </Modal>
+    <TouchableOpacity
+      activeOpacity={0.7}
+      onPress={onPress}
+      style={[styles.pickerRow, active && styles.pickerRowActive]}>
+      <Text
+        style={[styles.pickerRowText, active && styles.pickerRowTextActive]}
+        allowFontScaling={false}
+        numberOfLines={1}>
+        {label}
+      </Text>
+    </TouchableOpacity>
   );
 }
 
 function UnauthedState({ onOpenApp }: { onOpenApp: () => void }) {
   return (
-    <Centered>
+    <View style={styles.centered}>
       <Text style={styles.title} allowFontScaling={false}>
         Sign in to save
       </Text>
@@ -442,30 +458,23 @@ function UnauthedState({ onOpenApp }: { onOpenApp: () => void }) {
         Open Sortlist on this device to sign in. We&apos;ll remember it after
         that.
       </Text>
-      <Pressable
+      <TouchableOpacity
+        activeOpacity={0.85}
         onPress={onOpenApp}
-        style={({ pressed }) => [
-          styles.saveBtn,
-          { marginTop: 16, alignSelf: 'stretch' },
-          pressed && { backgroundColor: Brand.coralDark },
-        ]}>
+        style={[styles.saveBtn, { marginTop: 16, alignSelf: 'stretch' }]}>
         <Text style={styles.saveBtnText} allowFontScaling={false}>
           Open Sortlist
         </Text>
-      </Pressable>
-    </Centered>
+      </TouchableOpacity>
+    </View>
   );
-}
-
-function Centered({ children }: { children: React.ReactNode }) {
-  return <View style={styles.centered}>{children}</View>;
 }
 
 function labelFor(choice: SortChoice, collections: Collection[]): string {
   if (choice === AI_OPTION) return '✦  AI will sort this';
   if (choice === NEW_OPTION) return '+  New sortlist';
   const found = collections.find((c) => c.id === choice);
-  return found ? found.name : 'AI will sort this';
+  return found ? found.name : '✦  AI will sort this';
 }
 
 function extractUrl(
@@ -528,15 +537,9 @@ const styles = StyleSheet.create({
     paddingTop: 14,
     paddingBottom: 8,
   },
-  headerCancel: {
-    fontSize: 16,
-    color: Brand.ink,
-  },
-  headerCenter: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
+  headerSlot: { width: 56 },
+  headerCancel: { fontSize: 16, color: Brand.ink },
+  headerCenter: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   brandDot: {
     width: 10,
     height: 10,
@@ -550,10 +553,11 @@ const styles = StyleSheet.create({
     letterSpacing: 0.4,
   },
   body: {
+    flex: 1,
     paddingHorizontal: 20,
     paddingTop: 8,
-    paddingBottom: 16,
-    gap: 16,
+    paddingBottom: 20,
+    gap: 14,
   },
   centered: {
     flex: 1,
@@ -568,11 +572,10 @@ const styles = StyleSheet.create({
     color: Brand.ink,
     textAlign: 'center',
   },
-  dimText: {
-    fontSize: 14,
-    color: Brand.inkMuted,
-    textAlign: 'center',
-  },
+  dimText: { fontSize: 14, color: Brand.inkMuted, textAlign: 'center' },
+
+  section: { gap: 8 },
+
   previewCard: {
     flexDirection: 'row',
     backgroundColor: Brand.white,
@@ -583,28 +586,16 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   previewImageBox: {
-    width: 88,
-    height: 88,
+    width: 84,
+    height: 84,
     borderRadius: 12,
     overflow: 'hidden',
     backgroundColor: Brand.creamSoft,
   },
-  previewImage: {
-    width: '100%',
-    height: '100%',
-  },
-  previewImageEmpty: {
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  previewEmptyText: {
-    fontSize: 11,
-    color: Brand.inkMuted,
-  },
-  previewBody: {
-    flex: 1,
-    justifyContent: 'space-between',
-  },
+  previewImage: { width: '100%', height: '100%' },
+  previewImageEmpty: { alignItems: 'center', justifyContent: 'center' },
+  previewEmptyText: { fontSize: 11, color: Brand.inkMuted },
+  previewBody: { flex: 1, justifyContent: 'space-between' },
   previewBrand: {
     fontSize: 11,
     color: Brand.inkMuted,
@@ -622,36 +613,29 @@ const styles = StyleSheet.create({
     marginTop: 6,
     fontWeight: '600',
   },
+
   label: {
     fontSize: 11,
     letterSpacing: 1,
     color: Brand.inkMuted,
     textTransform: 'uppercase',
-    marginBottom: 6,
   },
   dropdown: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    height: 52,
+    height: 48,
     backgroundColor: Brand.white,
     borderRadius: 12,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: Brand.line,
     paddingHorizontal: 16,
   },
-  dropdownText: {
-    flex: 1,
-    fontSize: 16,
-    color: Brand.ink,
-  },
-  dropdownChevron: {
-    fontSize: 14,
-    color: Brand.inkMuted,
-    marginLeft: 8,
-  },
+  dropdownText: { flex: 1, fontSize: 16, color: Brand.ink },
+  dropdownChevron: { fontSize: 14, color: Brand.inkMuted, marginLeft: 8 },
+
   input: {
-    height: 52,
+    height: 48,
     backgroundColor: Brand.white,
     borderRadius: 12,
     borderWidth: StyleSheet.hairlineWidth,
@@ -660,6 +644,21 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: Brand.ink,
   },
+
+  pickerRow: {
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderRadius: 10,
+  },
+  pickerRowActive: { backgroundColor: Brand.creamSoft },
+  pickerRowText: { fontSize: 16, color: Brand.ink },
+  pickerRowTextActive: { color: Brand.coral, fontWeight: '600' },
+  pickerOverflowRow: {
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+  },
+  pickerOverflowText: { fontSize: 13, color: Brand.inkMuted },
+
   warn: {
     fontSize: 13,
     color: Brand.inkSoft,
@@ -668,56 +667,15 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     borderRadius: 10,
   },
-  error: {
-    fontSize: 13,
-    color: Brand.danger,
-  },
-  actions: {
-    paddingHorizontal: 20,
-    paddingTop: 8,
-    paddingBottom: 20,
-    backgroundColor: Brand.cream,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: Brand.line,
-  },
+  errorText: { fontSize: 13, color: Brand.danger },
+
   saveBtn: {
     height: 52,
     borderRadius: 14,
     backgroundColor: Brand.coral,
     alignItems: 'center',
     justifyContent: 'center',
+    marginTop: 'auto',
   },
-  saveBtnText: {
-    color: Brand.white,
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  modalBackdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.35)',
-    justifyContent: 'center',
-    paddingHorizontal: 24,
-  },
-  modalCard: {
-    backgroundColor: Brand.cream,
-    borderRadius: 20,
-    paddingTop: 16,
-    paddingBottom: 8,
-  },
-  modalTitle: {
-    fontSize: 11,
-    letterSpacing: 1,
-    color: Brand.inkMuted,
-    textTransform: 'uppercase',
-    paddingHorizontal: 20,
-    marginBottom: 8,
-  },
-  modalRow: {
-    paddingHorizontal: 20,
-    paddingVertical: 14,
-  },
-  modalRowText: {
-    fontSize: 16,
-    color: Brand.ink,
-  },
+  saveBtnText: { color: Brand.white, fontSize: 16, fontWeight: '600' },
 });
