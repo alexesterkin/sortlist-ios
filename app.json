@@ -67,7 +67,7 @@
           }
         }
       ],
-      "./plugins/withDevelopmentTeam.js"
+      "./plugins/withResourceBundleSigning.js"
     ],
     "experiments": {
       "typedRoutes": false
