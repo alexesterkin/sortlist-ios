@@ -94,8 +94,7 @@
       "expo-image"
     ],
     "experiments": {
-      "typedRoutes": false,
-      "reactCompiler": true
+      "typedRoutes": false
     },
     "extra": {
       "router": {},
