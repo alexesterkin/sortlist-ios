@@ -8,8 +8,8 @@
  *   The Swift pod `ExpoHead` depends upon `RNScreens`, which does not
  *   define modules.
  *
- * ExpoHead is NOT a separate npm package — it's a Swift sub-module
- * bundled inside `expo-router` (see expo-router/ios/ExpoHead.podspec).
+ * ExpoHead is NOT a separate npm package; it's a Swift sub-module
+ * bundled inside expo-router (see expo-router/ios/ExpoHead.podspec).
  * It powers expo-router's `<Head>` web/SEO + iOS Spotlight integration,
  * which we don't use anywhere in this app. expo-router's package
  * declares the module via:
@@ -21,15 +21,10 @@
  *     }
  *   }
  *
- * `use_expo_modules!` reads that JSON during pod install. Since ExpoHead
- * is a Swift pod that depends on RNScreens, and the RN auto-linked pods
- * aren't declared as modular by default, Swift can't import the
- * RNScreens header — pod install bails.
- *
- * `npx expo uninstall expo-head` doesn't exist (no such package). The
- * surgical fix is to remove the ExpoHead entries from expo-router's
- * expo-module.config.json before autolinking runs, leaving the rest of
- * expo-router (file-based routing) and LinkPreview untouched.
+ * `use_expo_modules!` reads that JSON during pod install. Since the
+ * Head module is a Swift pod that depends on RNScreens, and the RN
+ * auto-linked pods aren't declared as modular by default, Swift can't
+ * import the RNScreens header and pod install bails.
  *
  * Fix
  * ---
@@ -38,9 +33,9 @@
  *   - `ExpoHeadModule` from `apple.modules`
  *   - `ExpoHeadAppDelegateSubscriber` from `apple.appDelegateSubscribers`
  *
- * node_modules content is regenerated on every `npm install`, so this
- * runs again on each EAS build (which does install then prebuild). It's
- * idempotent — re-running on already-patched content is a no-op.
+ * This is a belt-and-suspenders pair with scripts/patch-expo-router-no-head.js
+ * which runs as `postinstall` after every `npm install`. Either alone is
+ * enough; both together cover every prebuild ordering EAS might use.
  */
 const fs = require('fs');
 const path = require('path');
@@ -50,7 +45,7 @@ const ROUTER_MODULE_CONFIG = 'node_modules/expo-router/expo-module.config.json';
 const MODULES_TO_DROP = new Set(['ExpoHeadModule']);
 const SUBSCRIBERS_TO_DROP = new Set(['ExpoHeadAppDelegateSubscriber']);
 
-module.exports = function withDisableExpoHead(config) {
+module.exports = function withDisableHeadModule(config) {
   return withDangerousMod(config, [
     'ios',
     async (cfg) => {
@@ -58,7 +53,7 @@ module.exports = function withDisableExpoHead(config) {
 
       if (!fs.existsSync(target)) {
         console.warn(
-          `[with-disable-expo-head] ${ROUTER_MODULE_CONFIG} not found; ` +
+          `[with-disable-head-module] ${ROUTER_MODULE_CONFIG} not found; ` +
             'is expo-router installed?',
         );
         return cfg;
@@ -69,7 +64,7 @@ module.exports = function withDisableExpoHead(config) {
         json = JSON.parse(fs.readFileSync(target, 'utf8'));
       } catch (e) {
         console.warn(
-          `[with-disable-expo-head] couldn't parse ${ROUTER_MODULE_CONFIG}: ${e.message}`,
+          `[with-disable-head-module] couldn't parse ${ROUTER_MODULE_CONFIG}: ${e.message}`,
         );
         return cfg;
       }
@@ -91,14 +86,13 @@ module.exports = function withDisableExpoHead(config) {
       }
 
       if (!modified) {
-        // Already patched on a previous prebuild — nothing to do.
-        return cfg;
+        return cfg; // already patched
       }
 
       json.apple = apple;
       fs.writeFileSync(target, JSON.stringify(json, null, 2) + '\n');
       console.info(
-        '[with-disable-expo-head] stripped ExpoHeadModule + ' +
+        '[with-disable-head-module] stripped ExpoHeadModule + ' +
           'ExpoHeadAppDelegateSubscriber from expo-router autolinking.',
       );
       return cfg;
