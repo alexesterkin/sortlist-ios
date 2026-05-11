@@ -7,27 +7,30 @@
     "development": {
       "developmentClient": true,
       "distribution": "internal",
+      "node": "20.19.4",
       "ios": {
-        "image": "macos-sonoma-14.6-xcode-16.0"
+        "image": "macos-sequoia-15.5-xcode-26.0"
       }
     },
     "preview": {
       "distribution": "internal",
+      "node": "20.19.4",
       "env": {
         "EXPO_PUBLIC_APP_VARIANT": "preview"
       },
       "ios": {
-        "image": "macos-sonoma-14.6-xcode-16.0",
+        "image": "macos-sequoia-15.5-xcode-26.0",
         "buildConfiguration": "Release"
       }
     },
     "production": {
       "autoIncrement": true,
+      "node": "20.19.4",
       "env": {
         "EXPO_PUBLIC_APP_VARIANT": "production"
       },
       "ios": {
-        "image": "macos-sonoma-14.6-xcode-16.0"
+        "image": "macos-sequoia-15.5-xcode-26.0"
       }
     }
   },
