@@ -7,7 +7,6 @@
     "icon": "./assets/images/icon.png",
     "scheme": "sortlist",
     "userInterfaceStyle": "light",
-    "newArchEnabled": false,
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.alexesterkin.sortlist",
@@ -32,7 +31,6 @@
         "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
-      "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false
     },
     "web": {
@@ -75,8 +73,13 @@
             "alpha": 1
           },
           "activationRules": [
-            { "type": "url", "max": 1 },
-            { "type": "text" }
+            {
+              "type": "url",
+              "max": 1
+            },
+            {
+              "type": "text"
+            }
           ],
           "excludedPackages": [
             "expo-dev-client",
@@ -88,7 +91,8 @@
       ],
       "./plugins/with-share-extension-exclude-pods.js",
       "./plugins/with-disable-head-module.js",
-      "./plugins/withModularHeaders"
+      "./plugins/withModularHeaders",
+      "expo-image"
     ],
     "experiments": {
       "typedRoutes": false,
