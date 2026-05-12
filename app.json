@@ -64,7 +64,8 @@
           }
         }
       ],
-      "./plugins/withDeduplicateBuildPhases.js"
+      "./plugins/withDeduplicateBuildPhases.js",
+      "./plugins/withPodfilePatch.js"
     ],
     "experiments": {
       "typedRoutes": false
