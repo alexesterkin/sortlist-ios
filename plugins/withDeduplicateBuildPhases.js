@@ -1,23 +1,22 @@
 const { withXcodeProject } = require('@expo/config-plugins');
 
 /**
- * Last-line-of-defence sweep: walks the generated Xcode project and
- * removes duplicate build-phase references and duplicate shell-script
- * phases produced by other plugins / pod post-install hooks.
+ * Walks every native target in the generated Xcode project and removes
+ * duplicate references in its `buildPhases` array.
  *
- * The known culprit on this project was
- * `[CP-User] [Hermes] Replace Hermes for the right configuration, if needed`
- * which was being injected into BOTH the main app and the share
- * extension by CocoaPods user-script phases, so xcbuild saw two tasks
- * producing the same output and aborted with "Unexpected duplicate
- * tasks". Generalises the fix: anything that ends up listed twice in a
- * target's buildPhases array, or any two shell-script phases sharing a
- * name, gets collapsed to a single entry.
+ * The previous version of this plugin also tried to dedupe shell-script
+ * phases by name via `project.pbxShellScriptBuildPhaseSection()`, but
+ * that method doesn't exist in the `xcode` package — the correct name
+ * is `pbxShellScriptBuildPhase()` (no "Section" suffix) and even that
+ * is rarely needed. The first-pass dedup on target.buildPhases is
+ * enough to fix the duplicate-tasks failures we've been seeing: two
+ * targets each end up referencing the same `[CP-User] [Hermes] Replace
+ * Hermes...` phase, and xcbuild aborts. Filtering each target's
+ * buildPhases array to one reference per UUID collapses that to a
+ * single task per target.
  *
- * Must be the LAST plugin in app.json's plugins array so it runs after
- * every other plugin (and after `prepare_react_native_project!` /
- * Cocoapods generation, since withXcodeProject mutates the post-prebuild
- * pbxproj).
+ * Run as the LAST plugin in app.json so every other plugin has
+ * finished mutating the pbxproj before this sweeps it.
  */
 module.exports = function withDeduplicateBuildPhases(config) {
   return withXcodeProject(config, (config) => {
@@ -35,21 +34,6 @@ module.exports = function withDeduplicateBuildPhases(config) {
         seen.add(id);
         return true;
       });
-    }
-
-    // Deduplicate shell script build phases by name
-    const scripts = project.pbxShellScriptBuildPhaseSection();
-    const seenNames = new Set();
-    for (const key in scripts) {
-      if (typeof scripts[key] === 'object' && scripts[key].name) {
-        const name = scripts[key].name;
-        if (seenNames.has(name)) {
-          delete scripts[key];
-          delete scripts[key + '_comment'];
-        } else {
-          seenNames.add(name);
-        }
-      }
     }
 
     return config;
