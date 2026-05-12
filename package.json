@@ -25,7 +25,6 @@
     "expo-build-properties": "~55.0.13",
     "expo-clipboard": "~55.0.13",
     "expo-constants": "~55.0.16",
-    "expo-dev-client": "~55.0.32",
     "expo-font": "~55.0.7",
     "expo-haptics": "~55.0.14",
     "expo-image": "~55.0.10",
