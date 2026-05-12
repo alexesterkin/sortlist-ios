@@ -63,8 +63,7 @@
             "newArchEnabled": false
           }
         }
-      ],
-      "./plugins/withResourceBundleSigning.js"
+      ]
     ],
     "experiments": {
       "typedRoutes": false

@@ -158,15 +158,19 @@ function withExtensionXcodeTarget(config) {
       target.uuid,
     );
 
-    // Frameworks build phase.
+    // Frameworks build phase. Create it EMPTY here — never pass framework
+    // names directly to addBuildPhase. The `addFramework(name, { target })`
+    // calls below add each framework to both the Frameworks PBXGroup and
+    // the target's Frameworks build phase in one step. Passing names to
+    // addBuildPhase *and* then calling addFramework adds the same
+    // framework twice, which surfaces as "Unexpected duplicate tasks"
+    // when xcbuild sees two link operations producing the same output.
     project.addBuildPhase(
-      frameworkNames,
+      [],
       'PBXFrameworksBuildPhase',
       'Frameworks',
       target.uuid,
     );
-    // Make sure each framework is also in the project's Frameworks group
-    // so the linker can find them.
     for (const f of frameworkNames) {
       project.addFramework(f, { target: target.uuid });
     }
@@ -242,17 +246,23 @@ function findMainAppTarget(project, projectName) {
 
 function addEmbedExtensionPhase(project, mainAppTarget, extensionTarget) {
   const phaseName = 'Embed App Extensions';
-  // Detect an existing embed phase so re-running prebuild doesn't add
-  // duplicate phases.
-  const existingPhases =
-    project.pbxCopyfilesBuildPhaseObj &&
-    project.pbxCopyfilesBuildPhaseObj.entries
-      ? project.pbxCopyfilesBuildPhaseObj.entries
-      : [];
-  const already = existingPhases.find(
-    (p) => p && p.comment === phaseName,
-  );
-  if (already) return;
+  // Idempotency: walk the main app target's buildPhases and see if any of
+  // them already references an "Embed App Extensions" PBXCopyFilesBuildPhase.
+  // The old check looked at project.pbxCopyfilesBuildPhaseObj which isn't a
+  // property xcode's pbxProject exposes, so the guard never fired — meaning
+  // a second prebuild on the same project would add a duplicate copy phase,
+  // and `xcbuild` would emit "Unexpected duplicate tasks" because two
+  // separate copy operations would write the same .appex into PlugIns/.
+  const copyFilesSection =
+    project.hash.project.objects.PBXCopyFilesBuildPhase || {};
+  const existingMatchingPhaseUuid = Object.keys(copyFilesSection).find((key) => {
+    if (key.endsWith('_comment')) return false;
+    const phase = copyFilesSection[key];
+    if (!phase || typeof phase !== 'object') return false;
+    // dstSubfolderSpec 13 = PlugIns; that's where app extensions go.
+    return Number(phase.dstSubfolderSpec) === 13 && phase.name && phase.name.includes(phaseName);
+  });
+  if (existingMatchingPhaseUuid) return;
 
   const phaseUuid = project.generateUuid();
   const buildFileUuid = project.generateUuid();
