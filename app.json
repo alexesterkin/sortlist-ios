@@ -18,9 +18,6 @@
       "entitlements": {
         "keychain-access-groups": [
           "$(AppIdentifierPrefix)com.alexesterkin.sortlist"
-        ],
-        "com.apple.security.application-groups": [
-          "group.com.alexesterkin.sortlist"
         ]
       },
       "infoPlist": {
