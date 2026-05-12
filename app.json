@@ -63,7 +63,8 @@
             "newArchEnabled": false
           }
         }
-      ]
+      ],
+      "./plugins/withDeduplicateBuildPhases.js"
     ],
     "experiments": {
       "typedRoutes": false
