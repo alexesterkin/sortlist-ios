@@ -150,13 +150,24 @@ function withExtensionXcodeTarget(config) {
     const mainGroupKey = project.getFirstProject().firstProject.mainGroup;
     project.addToPbxGroup(pbxGroup.uuid, mainGroupKey);
 
-    // Sources build phase.
-    project.addBuildPhase(
-      sourcesFileEntries,
-      'PBXSourcesBuildPhase',
-      'Sources',
-      target.uuid,
-    );
+    // Defensive: only call addBuildPhase if the target doesn't already
+    // have a same-named phase. addTarget() returns a clean PBXNativeTarget
+    // with `buildPhases: []`, so on a normal first run these guards never
+    // fire — the value is defending against re-entries we haven't thought
+    // of (cached EAS workspace, partial prebuild retry, etc).
+    //
+    // Audit note while we're here: this plugin's only build-phase
+    // additions to the share extension target are Sources / Frameworks /
+    // Resources, and the only addition to the MAIN app target is the
+    // "Embed App Extensions" copy phase. It never adds a
+    // PBXShellScriptBuildPhase, and never anything named "[Hermes]" —
+    // that phase comes from CocoaPods (hermes-engine pod's
+    // `script_phase`) at pod install time, not from this plugin.
+    addBuildPhaseIfMissing(project, target.uuid, {
+      files: sourcesFileEntries,
+      type: 'PBXSourcesBuildPhase',
+      name: 'Sources',
+    });
 
     // Frameworks build phase. Create it EMPTY here — never pass framework
     // names directly to addBuildPhase. The `addFramework(name, { target })`
@@ -165,19 +176,22 @@ function withExtensionXcodeTarget(config) {
     // addBuildPhase *and* then calling addFramework adds the same
     // framework twice, which surfaces as "Unexpected duplicate tasks"
     // when xcbuild sees two link operations producing the same output.
-    project.addBuildPhase(
-      [],
-      'PBXFrameworksBuildPhase',
-      'Frameworks',
-      target.uuid,
-    );
+    addBuildPhaseIfMissing(project, target.uuid, {
+      files: [],
+      type: 'PBXFrameworksBuildPhase',
+      name: 'Frameworks',
+    });
     for (const f of frameworkNames) {
       project.addFramework(f, { target: target.uuid });
     }
 
     // Empty resources phase — Info.plist isn't bundled as a resource;
     // it's referenced via INFOPLIST_FILE.
-    project.addBuildPhase([], 'PBXResourcesBuildPhase', 'Resources', target.uuid);
+    addBuildPhaseIfMissing(project, target.uuid, {
+      files: [],
+      type: 'PBXResourcesBuildPhase',
+      name: 'Resources',
+    });
 
     // Patch the target's build settings. xcode lib gives us the
     // configuration list UUID via `target.pbxNativeTarget.buildConfigurationList`.
@@ -224,6 +238,55 @@ function withExtensionXcodeTarget(config) {
     );
     return cfg;
   });
+}
+
+/**
+ * Wrap project.addBuildPhase with an existence guard. If the target
+ * already has a phase with the same `name` (matched on either the
+ * phase ref's comment in target.buildPhases or the phase object's
+ * own name in its section), the call is a no-op.
+ *
+ * On a normal EAS prebuild this never fires — addTarget() returns a
+ * target with no phases. The guard exists so a hypothetical second
+ * invocation (re-entry, cached partial state, etc) can't double-add.
+ */
+function addBuildPhaseIfMissing(project, targetUuid, { files, type, name }) {
+  const targets = project.pbxNativeTargetSection();
+  const target = targets[targetUuid];
+  if (target && Array.isArray(target.buildPhases)) {
+    const sectionForType =
+      (project.hash &&
+        project.hash.project &&
+        project.hash.project.objects &&
+        project.hash.project.objects[type]) ||
+      {};
+    for (const ref of target.buildPhases) {
+      // Match by the reference comment in the target's buildPhases array…
+      if (ref && ref.comment === name) {
+        console.info(
+          `[with-native-share-extension] phase "${name}" (${type}) already on ` +
+            `target ${target.name ?? targetUuid}, skipping`,
+        );
+        return null;
+      }
+      // …or by the phase object's own name field, if the ref isn't commented.
+      const phaseUuid = ref && ref.value;
+      const phase = phaseUuid && sectionForType[phaseUuid];
+      if (
+        phase &&
+        typeof phase === 'object' &&
+        typeof phase.name === 'string' &&
+        phase.name.replace(/^"|"$/g, '') === name
+      ) {
+        console.info(
+          `[with-native-share-extension] phase "${name}" (${type}) already on ` +
+            `target ${target.name ?? targetUuid}, skipping`,
+        );
+        return null;
+      }
+    }
+  }
+  return project.addBuildPhase(files, type, name, targetUuid);
 }
 
 function findMainAppTarget(project, projectName) {
