@@ -3,30 +3,114 @@ const fs = require('fs');
 const path = require('path');
 
 /**
- * Inject a dedup-and-save Ruby block into the Podfile's post_install
- * hook to remove duplicate build phases in BOTH:
+ * Three Podfile patches, all keyed by sentinel comments so each is
+ * idempotent and re-runnable:
  *
- *   1. The Pods project (`ios/Pods/Pods.xcodeproj/project.pbxproj`),
- *      which CocoaPods regenerates from scratch on every install.
- *   2. The aggregate targets' user_project — i.e. the main app's
- *      Xcode project file as seen by CocoaPods through the aggregate
- *      target. This is the file CocoaPods writes back when it
- *      finishes pod install, so a withXcodeProject-only fix gets
- *      overwritten.
+ *   1. Declare a top-level `target 'SortlistShareExtension' do … end`
+ *      block with `platform :ios, '15.1'` (Option 4). The block has no
+ *      pod declarations, so CocoaPods doesn't install any pods for the
+ *      share extension target — including hermes-engine.
  *
- * The crucial bit vs. the previous attempt: we explicitly `.save` the
- * projects after dedup. Without that, CocoaPods' own internal writes
- * later in pod install clobber our in-memory changes and the duplicate
- * phases come back.
+ *   2. Inside the post_install block, walk every aggregate target's
+ *      user_project AND the Pods project and dedupe build phases by
+ *      display_name. Saves each project afterward so the changes survive
+ *      whatever CocoaPods writes next.
  *
- * Patch is anchored on `react_native_post_install(installer)`, a line
- * that's stable across SDK 55 autogen Podfiles. Idempotent — keyed on a
- * marker comment.
+ *   3. Inside the post_install block, find the hermes-engine pod's
+ *      `[CP-User] [Hermes] Replace Hermes for the right configuration`
+ *      shell-script phase(s) and assign each one an `output_paths` of
+ *      `$(DERIVED_FILE_DIR)/hermes-dedupe-stamp` (Option 3). Each target
+ *      resolves `$(DERIVED_FILE_DIR)` to its own scope, so two phases
+ *      from two targets produce two distinct outputs and xcbuild can't
+ *      flag them as "Unexpected duplicate tasks".
  *
- * Must be the very last plugin in app.json so it runs after every other
- * plugin has finished generating / patching the Podfile.
+ * Plugin must be the very last entry in app.json's plugins array.
  */
-const MARKER = '# withPodfilePatch: dedupe Pods+user-project build phases';
+const MARKER_TARGET = '# withPodfilePatch: share extension target stub';
+const MARKER_DEDUP = '# withPodfilePatch: dedupe Pods+user-project build phases';
+const MARKER_HERMES = '# withPodfilePatch: hermes output_paths';
+
+const EXTENSION_TARGET_NAME = 'SortlistShareExtension';
+const EXTENSION_PLATFORM = "'15.1'";
+const POST_INSTALL_ANCHOR = 'react_native_post_install(installer)';
+
+/**
+ * Pure string transformation. Exported so tests can drive it without
+ * needing to mock withDangerousMod / the entire prebuild pipeline.
+ * Returns { contents, changed, warnings }.
+ */
+function applyPatches(podfile) {
+  const warnings = [];
+  let contents = podfile;
+  let changed = false;
+
+  // ─── Patch 1: top-level share-extension target block ─────────────────
+  if (!contents.includes(MARKER_TARGET)) {
+    const shareTargetBlock =
+      `${MARKER_TARGET}\n` +
+      `target '${EXTENSION_TARGET_NAME}' do\n` +
+      `  platform :ios, ${EXTENSION_PLATFORM}\n` +
+      `end\n\n`;
+
+    const postInstallTopLevel = /^post_install do \|installer\|/m;
+    if (postInstallTopLevel.test(contents)) {
+      contents = contents.replace(
+        postInstallTopLevel,
+        shareTargetBlock + 'post_install do |installer|',
+      );
+      changed = true;
+    } else {
+      warnings.push(
+        'could not find a top-level post_install block; ' +
+          'share extension target block NOT inserted',
+      );
+    }
+  }
+
+  // ─── Patches 2 + 3: dedup pass + hermes output_paths inside post_install ─
+  if (!contents.includes(MARKER_DEDUP)) {
+    const postInstallExtension =
+      `\n` +
+      `    ${MARKER_DEDUP}\n` +
+      `    installer.aggregate_targets.each do |aggregate_target|\n` +
+      `      aggregate_target.user_project.targets.each do |target|\n` +
+      `        target.build_phases.uniq!(&:display_name)\n` +
+      `        target.project.save\n` +
+      `      end\n` +
+      `    end\n` +
+      `\n` +
+      `    installer.pods_project.targets.each do |target|\n` +
+      `      target.build_phases.uniq!(&:display_name)\n` +
+      `    end\n` +
+      `\n` +
+      `    ${MARKER_HERMES}\n` +
+      `    installer.pods_project.targets.each do |target|\n` +
+      `      next unless target.name == 'hermes-engine'\n` +
+      `      target.build_phases.each do |phase|\n` +
+      `        next unless phase.is_a?(Xcodeproj::Project::Object::PBXShellScriptBuildPhase)\n` +
+      `        next unless phase.name&.include?('Replace Hermes')\n` +
+      `        phase.output_paths = ['$(DERIVED_FILE_DIR)/hermes-dedupe-stamp']\n` +
+      `      end\n` +
+      `    end\n` +
+      `\n` +
+      `    installer.pods_project.save`;
+
+    if (contents.includes(POST_INSTALL_ANCHOR)) {
+      contents = contents.replace(
+        POST_INSTALL_ANCHOR,
+        `${POST_INSTALL_ANCHOR}${postInstallExtension}`,
+      );
+      changed = true;
+    } else {
+      warnings.push(
+        `anchor "${POST_INSTALL_ANCHOR}" not found; ` +
+          'dedup + Hermes patches NOT applied',
+      );
+    }
+  }
+
+  return { contents, changed, warnings };
+}
 
 module.exports = function withPodfilePatch(config) {
   return withDangerousMod(config, [
@@ -43,48 +127,28 @@ module.exports = function withPodfilePatch(config) {
         return config;
       }
 
-      let podfile = fs.readFileSync(podfilePath, 'utf8');
-      if (podfile.includes(MARKER)) {
-        return config; // already patched on a previous prebuild
+      const original = fs.readFileSync(podfilePath, 'utf8');
+      const { contents, changed, warnings } = applyPatches(original);
+
+      for (const w of warnings) {
+        console.warn('[withPodfilePatch] ' + w);
       }
-
-      // Ruby that runs inside CocoaPods' post_install installer
-      // context. The two block style mirrors what the user specified —
-      // aggregate_targets covers the main app's user_project, then a
-      // separate pass cleans the Pods project itself. Each pass uses
-      // `uniq!(&:display_name)` (idiomatic Ruby symbol-to-proc) and is
-      // followed by an explicit `.save` so the change survives whatever
-      // CocoaPods writes next.
-      const dedupBlock = `
-    ${MARKER}
-    installer.aggregate_targets.each do |aggregate_target|
-      aggregate_target.user_project.targets.each do |target|
-        target.build_phases.uniq!(&:display_name)
-        target.project.save
-      end
-    end
-
-    installer.pods_project.targets.each do |target|
-      target.build_phases.uniq!(&:display_name)
-    end
-    installer.pods_project.save`;
-
-      const anchor = 'react_native_post_install(installer)';
-      if (!podfile.includes(anchor)) {
-        console.warn(
-          '[withPodfilePatch] anchor "' + anchor + '" not found in Podfile; ' +
-            "Podfile shape has changed and the patch wasn't applied.",
+      if (changed) {
+        fs.writeFileSync(podfilePath, contents);
+        console.info(
+          '[withPodfilePatch] applied patches: share-ext target block + ' +
+            'aggregate/pods dedup-and-save + hermes-engine output_paths',
         );
-        return config;
+      } else {
+        console.info(
+          '[withPodfilePatch] all patches already present; nothing to do',
+        );
       }
-
-      podfile = podfile.replace(anchor, `${anchor}${dedupBlock}`);
-      fs.writeFileSync(podfilePath, podfile);
-      console.info(
-        '[withPodfilePatch] injected aggregate_targets + pods_project ' +
-          'dedup-and-save into Podfile post_install',
-      );
       return config;
     },
   ]);
 };
+
+// Export the pure transform for testing (no side effects).
+module.exports.applyPatches = applyPatches;
+module.exports.MARKERS = { MARKER_TARGET, MARKER_DEDUP, MARKER_HERMES };
