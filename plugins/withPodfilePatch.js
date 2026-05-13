@@ -72,6 +72,10 @@ function applyPatches(podfile) {
     const postInstallExtension =
       `\n` +
       `    ${MARKER_DEDUP}\n` +
+      `    puts "======= SORTLIST PODFILE PATCH RUNNING ======="\n` +
+      `    puts "======= SORTLIST PODFILE CONTENT BEGIN ======="\n` +
+      `    puts File.read('/Users/expo/workingdir/build/ios/Podfile')\n` +
+      `    puts "======= SORTLIST PODFILE CONTENT END ======="\n` +
       `    installer.aggregate_targets.each do |aggregate_target|\n` +
       `      aggregate_target.user_project.targets.each do |target|\n` +
       `        target.build_phases.uniq!(&:display_name)\n` +
