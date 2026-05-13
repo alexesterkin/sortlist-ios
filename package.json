@@ -8,7 +8,8 @@
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",
-    "lint": "expo lint"
+    "lint": "expo lint",
+    "eas-build-post-install": "bash ./.eas/build/post-install.sh"
   },
   "dependencies": {
     "@expo-google-fonts/instrument-serif": "^0.4.1",

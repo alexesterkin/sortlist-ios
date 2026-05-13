@@ -1,0 +1,5 @@
+# EAS Build hooks run on macOS. CRLF line endings in a shell script make
+# the kernel fail to find the interpreter ("bad interpreter: /bin/bash^M").
+# Force LF on every script committed from this repo.
+*.sh text eol=lf
+.eas/build/* text eol=lf
