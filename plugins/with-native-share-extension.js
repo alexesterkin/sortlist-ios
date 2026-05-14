@@ -323,7 +323,7 @@ function addEmbedExtensionPhase(project, mainAppTarget, extensionTarget) {
     const phase = copyFilesSection[key];
     if (!phase || typeof phase !== 'object') return false;
     // dstSubfolderSpec 13 = PlugIns; that's where app extensions go.
-    return Number(phase.dstSubfolderSpec) === 13 && phase.name && phase.name.includes(phaseName);
+    return Number(phase.dstSubfolderSpec) === 13;
   });
   if (existingMatchingPhaseUuid) return;
 
