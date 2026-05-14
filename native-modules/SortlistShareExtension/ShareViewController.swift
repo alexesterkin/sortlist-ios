@@ -37,7 +37,6 @@ final class ShareViewController: UIViewController {
     private static let keychainService = "sortlist:no-auth"
     private static let keychainAccount = "sortlist.session_token"
     private static let apiURL = URL(string: "https://www.sortlist.shop/api/trpc/products.add")!
-    private static let cookieName = "app_session_id"
 
     private static let coral = UIColor(red: 1.0, green: 0.357, blue: 0.227, alpha: 1.0)
     private static let cream = UIColor(red: 0.980, green: 0.972, blue: 0.953, alpha: 1.0)
@@ -364,8 +363,15 @@ final class ShareViewController: UIViewController {
         var request = URLRequest(url: Self.apiURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        // Bearer ONLY — never a Cookie header. The backend's
+        // authenticateRequest (server/_core/auth.ts:101) does
+        // `cookieToken || bearerToken`, so when both are present the
+        // cookie wins and a malformed/stale cookie value masks a perfectly
+        // valid Bearer (returns ForbiddenError instead of falling back).
+        // Empirically: Bearer + Cookie → auth.me null; Bearer alone → success.
+        // The main-app tRPC client already enforces this in lib/trpc.ts;
+        // mirror it here.
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("\(Self.cookieName)=\(token)", forHTTPHeaderField: "Cookie")
 
         // tRPC v11 + superjson wire format. The backend's `products.add`
         // accepts `url` + other optional fields; we only send `url` and
