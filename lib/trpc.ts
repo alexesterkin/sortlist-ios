@@ -8,6 +8,20 @@ import {
   setSessionToken,
 } from './session';
 
+// Auth transport: Bearer ONLY.
+//
+// Test matrix (run from the iOS dev client against sortlist.shop):
+//   A. Bearer + Cookie  → auth.me returned null
+//   B. Cookie only      → auth.me returned null
+//   C. Bearer only      → auth.me returned the full user object
+//
+// The server's authenticateRequest accepts Cookie when it's the only
+// transport, but when both are sent it seems to short-circuit on the
+// Cookie path and then fail (most likely a session-format mismatch
+// between the web app's session cookie value and the JWT we'd put
+// behind the same cookie name). Sending only Authorization: Bearer
+// sidesteps the whole thing.
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const trpcReact = createTRPCReact<any>();
 
@@ -24,11 +38,11 @@ export const trpc = trpcReact as unknown as {
 
 const DEBUG_TRPC = true;
 
-function logRequest(url: string, sentCookie: boolean, sentBearer: boolean) {
+function logRequest(url: string, sentBearer: boolean) {
   if (!DEBUG_TRPC) return;
   // eslint-disable-next-line no-console
   console.log(
-    `[Sortlist tRPC] -> ${shortenUrl(url)} | Cookie: ${sentCookie ? 'yes' : 'no'} | Bearer: ${sentBearer ? 'yes' : 'no'}`,
+    `[Sortlist tRPC] -> ${shortenUrl(url)} | Bearer: ${sentBearer ? 'yes' : 'no'}`,
   );
 }
 
@@ -49,23 +63,23 @@ const cookieFetch: typeof fetch = async (input, init) => {
   const token = getSessionToken();
   const headers = new Headers(init?.headers);
 
-  // Attach BOTH transports. Cookie is what the web app uses; Authorization
-  // is the iOS path. Backend (authenticateRequest in
-  // server/_core/auth.ts) accepts either — cookie wins when both are
-  // present, but it costs nothing to send both.
+  // Bearer ONLY. Explicitly do NOT set a Cookie header — empirically the
+  // server's auth path is poisoned when a cookie is also present
+  // (see test matrix at the top of this file).
   if (token) {
-    headers.set('Cookie', `${SESSION_COOKIE_NAME}=${token}`);
     headers.set('Authorization', `Bearer ${token}`);
   }
-
+  // And belt-and-braces: don't let the iOS URL session pull cookies
+  // out of NSHTTPCookieStorage either. `credentials: 'omit'` keeps
+  // every request strictly Authorization-only.
   const reqUrl =
     typeof input === 'string' ? input : (input as Request).url ?? String(input);
-  logRequest(reqUrl, !!token, !!token);
+  logRequest(reqUrl, !!token);
 
   const res = await fetch(input as RequestInfo, {
     ...init,
     headers,
-    credentials: 'include',
+    credentials: 'omit',
   });
 
   // Best-effort Set-Cookie capture for platforms where the response
