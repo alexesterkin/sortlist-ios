@@ -21,8 +21,17 @@ const TOKEN_KEY = 'sortlist.session_token';
 const LEGACY_COOKIE_KEY = 'sortlist.session_cookie'; // pre-rename users
 const COOKIE_NAME = 'app_session_id';
 
+// Explicit keychainService so the Share Extension's keychain query can
+// match a known service name. Without this, expo-secure-store defaults
+// to "app" — the SE wouldn't know to look there. Note expo-secure-store
+// also appends ":no-auth" to the service name internally (because we
+// don't set requireAuthentication) — the SE has to query for
+// "sortlist:no-auth", not bare "sortlist". See ShareViewController.swift.
+const KEYCHAIN_SERVICE = 'sortlist';
+
 const secureOpts: SecureStore.SecureStoreOptions = {
   accessGroup: ACCESS_GROUP,
+  keychainService: KEYCHAIN_SERVICE,
   // Read after first device unlock so the share extension can hit it
   // even when the device just rebooted and the user hasn't opened the
   // app yet — as long as the device is unlocked.
@@ -38,7 +47,9 @@ const listeners = new Set<(token: string | null) => void>();
 async function readSecure(): Promise<string | null> {
   try {
     return await SecureStore.getItemAsync(TOKEN_KEY, secureOpts);
-  } catch {
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.warn('[Sortlist Session] readSecure failed:', (e as Error)?.message ?? e);
     return null;
   }
 }
@@ -50,9 +61,18 @@ async function writeSecure(token: string | null): Promise<void> {
     } else {
       await SecureStore.deleteItemAsync(TOKEN_KEY, secureOpts);
     }
-  } catch {
-    // SecureStore unavailable (no entitlement, simulator quirk, etc).
-    // Not fatal — AsyncStorage still has the value as a fallback.
+  } catch (e) {
+    // SecureStore failures used to be swallowed silently — that's how
+    // the Share Extension keychain bug went unnoticed across builds.
+    // Surface it now so future regressions are obvious in Metro logs.
+    // AsyncStorage still has the value as a fallback, so this is
+    // non-fatal for the main app — but it DOES mean the Share
+    // Extension can't see the token.
+    // eslint-disable-next-line no-console
+    console.warn(
+      '[Sortlist Session] writeSecure failed — Share Extension will be unable to read JWT:',
+      (e as Error)?.message ?? e,
+    );
   }
 }
 

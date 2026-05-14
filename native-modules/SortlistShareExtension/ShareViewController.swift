@@ -26,7 +26,16 @@ final class ShareViewController: UIViewController {
     /// file that the config plugin writes. The bare value (no `$(AppIdentifierPrefix)`
     /// prefix) is what SecItemCopyMatching wants — iOS prepends the team prefix.
     private static let keychainAccessGroup = "com.alexesterkin.sortlist"
-    private static let keychainService = "sortlist.session_token"
+    /// Must exactly match the value expo-secure-store stores under in the
+    /// host app. expo-secure-store builds the kSecAttrService value as
+    /// `<options.keychainService>:<auth|no-auth>` — we configure
+    /// keychainService="sortlist" in lib/session.ts and don't set
+    /// requireAuthentication, so the host app writes under
+    /// service="sortlist:no-auth". The token key itself
+    /// ("sortlist.session_token") ends up in kSecAttrAccount as UTF-8 bytes
+    /// (see SecureStoreModule.swift in node_modules/expo-secure-store).
+    private static let keychainService = "sortlist:no-auth"
+    private static let keychainAccount = "sortlist.session_token"
     private static let apiURL = URL(string: "https://www.sortlist.shop/api/trpc/products.add")!
     private static let cookieName = "app_session_id"
 
@@ -310,18 +319,40 @@ final class ShareViewController: UIViewController {
     /// The access group is the one declared in BOTH the main app's
     /// entitlements (app.json) and this extension's entitlements (written
     /// by plugins/with-native-share-extension.js).
+    ///
+    /// The query has to mirror expo-secure-store's exact storage shape:
+    ///   - kSecAttrService:     "<keychainService>:<auth|no-auth>"
+    ///   - kSecAttrAccount:     Data(<key>.utf8) — the JS-side key as raw bytes
+    ///   - kSecAttrAccessGroup: bare access group (iOS prepends team prefix)
+    ///
+    /// If any of these don't match exactly, SecItemCopyMatching returns
+    /// errSecItemNotFound (-25300) and the user sees "Open Sortlist and
+    /// sign in first" — even when the token is sitting in the keychain.
     private func readJWT() -> String? {
+        let accountData = Data(Self.keychainAccount.utf8)
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.keychainService,
+            kSecAttrAccount as String: accountData,
             kSecAttrAccessGroup as String: Self.keychainAccessGroup,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
         var item: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
-        guard status == errSecSuccess, let data = item as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
+        if status != errSecSuccess {
+            // Make this visible in Console.app / xcrun simctl log stream so
+            // we don't repeat the silent-keychain-miss debugging cycle.
+            NSLog("[SortlistShareExtension] readJWT failed: OSStatus=%d service=%@ group=%@",
+                  status, Self.keychainService, Self.keychainAccessGroup)
+            return nil
+        }
+        guard let data = item as? Data, let token = String(data: data, encoding: .utf8) else {
+            NSLog("[SortlistShareExtension] readJWT decode failed")
+            return nil
+        }
+        NSLog("[SortlistShareExtension] readJWT success (length=%d)", token.count)
+        return token
     }
 
     enum SaveResult {
