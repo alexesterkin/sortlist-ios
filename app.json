@@ -80,7 +80,12 @@
               "appExtensions": [
                 {
                   "targetName": "SortlistShareExtension",
-                  "bundleIdentifier": "com.alexesterkin.sortlist.ShareExtension"
+                  "bundleIdentifier": "com.alexesterkin.sortlist.ShareExtension",
+                  "entitlements": {
+                    "keychain-access-groups": [
+                      "$(AppIdentifierPrefix)com.alexesterkin.sortlist"
+                    ]
+                  }
                 }
               ]
             }
