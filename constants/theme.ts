@@ -61,27 +61,33 @@ export const Colors = {
   },
 };
 
-// Font family names line up with what
-// @expo-google-fonts/instrument-serif exports.
-// useFonts({ InstrumentSerif_400Regular, InstrumentSerif_400Regular_Italic })
-// in app/_layout.tsx registers these names with the iOS font system.
+// Font family names line up with what the @expo-google-fonts packages export.
+// app/_layout.tsx registers:
+//   InstrumentSerif_400Regular, InstrumentSerif_400Regular_Italic  (display/title)
+//   Geist_400Regular, Geist_500Medium, Geist_600SemiBold           (body/UI)
 export const Fonts = Platform.select({
   ios: {
-    sans: 'system-ui',
+    sans: 'Geist_400Regular',
+    sansMedium: 'Geist_500Medium',
+    sansSemibold: 'Geist_600SemiBold',
     serif: 'InstrumentSerif_400Regular',
     serifItalic: 'InstrumentSerif_400Regular_Italic',
     rounded: 'ui-rounded',
     mono: 'ui-monospace',
   },
   default: {
-    sans: 'normal',
+    sans: 'Geist_400Regular',
+    sansMedium: 'Geist_500Medium',
+    sansSemibold: 'Geist_600SemiBold',
     serif: 'InstrumentSerif_400Regular',
     serifItalic: 'InstrumentSerif_400Regular_Italic',
     rounded: 'normal',
     mono: 'monospace',
   },
   web: {
-    sans: "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
+    sans: "'Geist', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
+    sansMedium: "'Geist', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
+    sansSemibold: "'Geist', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
     serif: "'Instrument Serif', Georgia, 'Times New Roman', serif",
     serifItalic: "'Instrument Serif', Georgia, 'Times New Roman', serif",
     rounded: "'SF Pro Rounded', 'Hiragino Maru Gothic ProN', Meiryo, 'MS PGothic', sans-serif",

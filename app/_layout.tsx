@@ -1,4 +1,9 @@
 import {
+  Geist_400Regular,
+  Geist_500Medium,
+  Geist_600SemiBold,
+} from '@expo-google-fonts/geist';
+import {
   InstrumentSerif_400Regular,
   InstrumentSerif_400Regular_Italic,
   useFonts,
@@ -50,6 +55,9 @@ export default function RootLayout() {
   const [loaded, error] = useFonts({
     InstrumentSerif_400Regular,
     InstrumentSerif_400Regular_Italic,
+    Geist_400Regular,
+    Geist_500Medium,
+    Geist_600SemiBold,
   });
 
   useEffect(() => {

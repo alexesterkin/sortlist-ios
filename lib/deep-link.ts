@@ -13,13 +13,13 @@ export function useDeepLinkHandler(isAuthed: boolean) {
         return;
       }
       const path = (parsed.path ?? '').replace(/^\/+/, '');
-      const params = parsed.queryParams ?? {};
+      // The native "Add product" modal moved to the WebView. The sortlist://
+      // add?url=... deep link still works to land the user in the app, but
+      // we just drop them on the WebView tab — the web app handles add
+      // flows now. The url= param is currently ignored; if/when we want to
+      // pre-fill the web add flow, we can postMessage it into the WebView.
       if (path === 'add' && isAuthed) {
-        const url = typeof params.url === 'string' ? params.url : undefined;
-        router.push({
-          pathname: '/(app)/add',
-          params: url ? { url } : {},
-        });
+        router.replace('/(app)' as never);
       }
     };
 
