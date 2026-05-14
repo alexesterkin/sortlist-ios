@@ -52,7 +52,11 @@ final class ShareViewController: UIViewController {
     private let brandLabel = UILabel()
     private let titleLabel = UILabel()
     private let urlLabel = UILabel()
-    private let statusLabel = UILabel()
+    // UITextView (not UILabel) so error / diagnostic text is selectable
+    // and copy-pasteable — the share extension is a sandboxed UIKit
+    // process with no access to Metro logs or Console.app, so on-screen
+    // copy-out is the only way to ship diagnostic data off the device.
+    private let statusLabel = UITextView()
     private let cancelButton = UIButton(type: .system)
     private let saveButton = UIButton(type: .system)
     private let spinner = UIActivityIndicatorView(style: .medium)
@@ -123,8 +127,14 @@ final class ShareViewController: UIViewController {
 
         statusLabel.font = UIFont.systemFont(ofSize: 13)
         statusLabel.textColor = Self.inkMuted
-        statusLabel.numberOfLines = 0
         statusLabel.text = nil
+        statusLabel.isEditable = false
+        statusLabel.isSelectable = true
+        statusLabel.isScrollEnabled = false
+        statusLabel.backgroundColor = .clear
+        statusLabel.textContainer.lineFragmentPadding = 0
+        statusLabel.textContainerInset = .zero
+        statusLabel.dataDetectorTypes = []
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
         cardView.addSubview(statusLabel)
 
@@ -270,8 +280,12 @@ final class ShareViewController: UIViewController {
             showError("No URL to save.")
             return
         }
-        guard let token = readJWT() else {
-            showError("Open Sortlist and sign in first.")
+        let token: String
+        switch readJWT() {
+        case .found(let t):
+            token = t
+        case .missing(let diagnostic):
+            showError("Open Sortlist and sign in first.", diagnostic: diagnostic)
             return
         }
 
@@ -283,9 +297,9 @@ final class ShareViewController: UIViewController {
                 case .success:
                     self.didFinish = true
                     self.dismissExtension()
-                case .failure(let message):
+                case .failure(let message, let diagnostic):
                     self.setSaving(false)
-                    self.showError(message)
+                    self.showError(message, diagnostic: diagnostic)
                 }
             }
         }
@@ -307,29 +321,61 @@ final class ShareViewController: UIViewController {
         }
     }
 
-    private func showError(_ message: String) {
-        statusLabel.text = message
+    private func showError(_ message: String, diagnostic: String? = nil) {
         statusLabel.textColor = Self.danger
+        guard let diagnostic = diagnostic, !diagnostic.isEmpty else {
+            statusLabel.font = UIFont.systemFont(ofSize: 13)
+            statusLabel.text = message
+            return
+        }
+        // Compose attributed text: red error headline + monospaced
+        // gray-ish diagnostic block. Long-press selects + copies, so the
+        // user can paste this back to me verbatim.
+        let header = NSMutableAttributedString(
+            string: message + "\n\nDiagnostic (long-press to copy):\n",
+            attributes: [
+                .font: UIFont.systemFont(ofSize: 13),
+                .foregroundColor: Self.danger,
+            ]
+        )
+        let body = NSAttributedString(
+            string: diagnostic,
+            attributes: [
+                .font: UIFont.monospacedSystemFont(ofSize: 11, weight: .regular),
+                .foregroundColor: Self.ink.withAlphaComponent(0.75),
+            ]
+        )
+        header.append(body)
+        statusLabel.attributedText = header
     }
 
     // MARK: - Auth & networking
+
+    /// Result of attempting to read the JWT from the shared keychain.
+    /// On `.missing`, `diagnostic` is a multi-section text block that
+    /// describes exactly what we queried for, what came back, and what
+    /// else is sitting in the keychain access group. Designed to be
+    /// shown verbatim in the share sheet so the user can copy-paste
+    /// it back to me without needing Console.app.
+    enum JWTReadResult {
+        case found(String)
+        case missing(diagnostic: String)
+    }
 
     /// Reads the JWT the main app wrote at sign-in via expo-secure-store.
     /// The access group is the one declared in BOTH the main app's
     /// entitlements (app.json) and this extension's entitlements (written
     /// by plugins/with-native-share-extension.js).
     ///
-    /// The query has to mirror expo-secure-store's exact storage shape:
+    /// expo-secure-store storage shape:
     ///   - kSecAttrService:     "<keychainService>:<auth|no-auth>"
-    ///   - kSecAttrAccount:     Data(<key>.utf8) — the JS-side key as raw bytes
+    ///   - kSecAttrAccount:     Data(<key>.utf8) — JS-side key as raw bytes
     ///   - kSecAttrAccessGroup: bare access group (iOS prepends team prefix)
-    ///
-    /// If any of these don't match exactly, SecItemCopyMatching returns
-    /// errSecItemNotFound (-25300) and the user sees "Open Sortlist and
-    /// sign in first" — even when the token is sitting in the keychain.
-    private func readJWT() -> String? {
+    private func readJWT() -> JWTReadResult {
         let accountData = Data(Self.keychainAccount.utf8)
-        let query: [String: Any] = [
+
+        // Primary query — exactly what we expect to find.
+        let primary: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.keychainService,
             kSecAttrAccount as String: accountData,
@@ -338,25 +384,121 @@ final class ShareViewController: UIViewController {
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
         var item: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        if status != errSecSuccess {
-            // Make this visible in Console.app / xcrun simctl log stream so
-            // we don't repeat the silent-keychain-miss debugging cycle.
-            NSLog("[SortlistShareExtension] readJWT failed: OSStatus=%d service=%@ group=%@",
-                  status, Self.keychainService, Self.keychainAccessGroup)
-            return nil
+        let primaryStatus = SecItemCopyMatching(primary as CFDictionary, &item)
+
+        if primaryStatus == errSecSuccess,
+           let data = item as? Data,
+           let token = String(data: data, encoding: .utf8) {
+            return .found(token)
         }
-        guard let data = item as? Data, let token = String(data: data, encoding: .utf8) else {
-            NSLog("[SortlistShareExtension] readJWT decode failed")
-            return nil
+
+        // Anything other than success → assemble the diagnostic.
+        var diag = ""
+        func line(_ s: String) { diag += s + "\n" }
+
+        line("primary query:")
+        line("  OSStatus       = \(primaryStatus) (\(Self.osStatusName(primaryStatus)))")
+        line("  service        = \(Self.keychainService)")
+        line("  account        = \(Self.keychainAccount)")
+        line("  access_group   = \(Self.keychainAccessGroup)")
+        line("  ext bundle id  = \(Bundle.main.bundleIdentifier ?? "?")")
+        line("")
+
+        // Scan A: same access group + account, any service. Tells us if
+        // the JWT is sitting under a DIFFERENT service name (e.g. the
+        // legacy "app:no-auth" pre-keychainService-fix would show up here).
+        let scanByAccount: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: accountData,
+            kSecAttrAccessGroup as String: Self.keychainAccessGroup,
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitAll,
+        ]
+        var scanByAccountItems: AnyObject?
+        let scanByAccountStatus = SecItemCopyMatching(scanByAccount as CFDictionary, &scanByAccountItems)
+        line("scan A (group + account, ANY service):")
+        if scanByAccountStatus == errSecSuccess, let array = scanByAccountItems as? [[String: Any]] {
+            if array.isEmpty {
+                line("  (no matches)")
+            } else {
+                for attrs in array {
+                    let svc = attrs[kSecAttrService as String] as? String ?? "?"
+                    line("  service = \(svc)")
+                }
+            }
+        } else if scanByAccountStatus == errSecItemNotFound {
+            line("  (no matches — errSecItemNotFound)")
+        } else {
+            line("  OSStatus = \(scanByAccountStatus) (\(Self.osStatusName(scanByAccountStatus)))")
         }
-        NSLog("[SortlistShareExtension] readJWT success (length=%d)", token.count)
-        return token
+        line("")
+
+        // Scan B: access group only — tells us if the SE has ANY visibility
+        // into the keychain group at all. errSecMissingEntitlement here
+        // would be the smoking gun for a wrong entitlement on the SE side.
+        let scanByGroup: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccessGroup as String: Self.keychainAccessGroup,
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitAll,
+        ]
+        var scanByGroupItems: AnyObject?
+        let scanByGroupStatus = SecItemCopyMatching(scanByGroup as CFDictionary, &scanByGroupItems)
+        line("scan B (group only, ANY service/account):")
+        if scanByGroupStatus == errSecSuccess, let array = scanByGroupItems as? [[String: Any]] {
+            if array.isEmpty {
+                line("  (group reachable but empty)")
+            } else {
+                for attrs in array.prefix(20) {
+                    let svc = attrs[kSecAttrService as String] as? String ?? "?"
+                    let acctStr: String
+                    if let d = attrs[kSecAttrAccount as String] as? Data {
+                        acctStr = String(data: d, encoding: .utf8) ?? "<bin \(d.count)b>"
+                    } else if let s = attrs[kSecAttrAccount as String] as? String {
+                        acctStr = s
+                    } else {
+                        acctStr = "?"
+                    }
+                    line("  service=\(svc)  account=\(acctStr)")
+                }
+                if array.count > 20 {
+                    line("  …+\(array.count - 20) more")
+                }
+            }
+        } else if scanByGroupStatus == errSecItemNotFound {
+            line("  (no items)")
+        } else if scanByGroupStatus == errSecMissingEntitlement {
+            line("  errSecMissingEntitlement — SE entitlement missing this access_group")
+        } else {
+            line("  OSStatus = \(scanByGroupStatus) (\(Self.osStatusName(scanByGroupStatus)))")
+        }
+
+        return .missing(diagnostic: diag.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// Map common OSStatus values to their symbolic names so the
+    /// on-screen diagnostic is readable without needing a Swift REPL.
+    private static func osStatusName(_ status: OSStatus) -> String {
+        switch status {
+        case errSecSuccess: return "errSecSuccess"
+        case errSecItemNotFound: return "errSecItemNotFound"
+        case errSecMissingEntitlement: return "errSecMissingEntitlement"
+        case errSecAuthFailed: return "errSecAuthFailed"
+        case errSecInteractionNotAllowed: return "errSecInteractionNotAllowed"
+        case errSecParam: return "errSecParam"
+        case errSecAllocate: return "errSecAllocate"
+        case errSecBadReq: return "errSecBadReq"
+        case errSecDuplicateItem: return "errSecDuplicateItem"
+        case errSecDecode: return "errSecDecode"
+        case errSecUnimplemented: return "errSecUnimplemented"
+        case errSecNotAvailable: return "errSecNotAvailable"
+        default: return "unknown"
+        }
     }
 
     enum SaveResult {
         case success
-        case failure(String)
+        case failure(message: String, diagnostic: String?)
     }
 
     private func postToBackend(urlString: String, token: String, completion: @escaping (SaveResult) -> Void) {
@@ -380,25 +522,40 @@ final class ShareViewController: UIViewController {
         do {
             request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [])
         } catch {
-            completion(.failure("Couldn't encode request."))
+            completion(.failure(message: "Couldn't encode request.", diagnostic: nil))
             return
         }
 
+        let url = Self.apiURL.absoluteString
+        let tokenPreview = "\(token.prefix(12))…(len=\(token.count))"
         let task = URLSession.shared.dataTask(with: request) { data, response, error in
             if let error = error {
-                completion(.failure(error.localizedDescription))
+                let diag = """
+                stage:  URLSession transport error
+                url:    \(url)
+                token:  \(tokenPreview)
+                error:  \(error.localizedDescription)
+                """
+                completion(.failure(message: error.localizedDescription, diagnostic: diag))
                 return
             }
             guard let httpResp = response as? HTTPURLResponse else {
-                completion(.failure("No response from server."))
+                let diag = """
+                stage:  invalid response
+                url:    \(url)
+                token:  \(tokenPreview)
+                """
+                completion(.failure(message: "No response from server.", diagnostic: diag))
                 return
             }
             if (200...299).contains(httpResp.statusCode) {
                 completion(.success)
                 return
             }
-            // Surface a useful error from the body if we can. tRPC errors
-            // come back as `[{"error":{"json":{"message":"...","data":{"code":"...","httpStatus":...}}}}]`.
+            // Build a friendly message (parse the tRPC error JSON if we can)
+            // AND a full diagnostic with status + raw body so we never lose
+            // the server's real complaint.
+            var friendly = "HTTP \(httpResp.statusCode)"
             if let data = data,
                let any = try? JSONSerialization.jsonObject(with: data),
                let array = any as? [[String: Any]],
@@ -406,10 +563,27 @@ final class ShareViewController: UIViewController {
                let err = first["error"] as? [String: Any],
                let json = err["json"] as? [String: Any],
                let message = json["message"] as? String {
-                completion(.failure(message))
-                return
+                friendly = message
             }
-            completion(.failure("HTTP \(httpResp.statusCode)"))
+            let bodyString: String
+            if let data = data {
+                if let s = String(data: data, encoding: .utf8) {
+                    bodyString = s.count > 1500 ? String(s.prefix(1500)) + "…" : s
+                } else {
+                    bodyString = "<binary \(data.count) bytes>"
+                }
+            } else {
+                bodyString = "(empty)"
+            }
+            let diag = """
+            stage:  HTTP non-2xx
+            url:    \(url)
+            status: \(httpResp.statusCode)
+            token:  \(tokenPreview)
+            body:
+            \(bodyString)
+            """
+            completion(.failure(message: friendly, diagnostic: diag))
         }
         task.resume()
     }
