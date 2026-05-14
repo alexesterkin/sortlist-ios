@@ -7,7 +7,7 @@
     "development": {
       "distribution": "internal",
       "node": "20.19.4",
-      "prebuildCommand": "bash ./.eas/build/pre-build.sh",
+      ,
       "ios": {
         "image": "macos-sequoia-15.5-xcode-26.0"
       }
@@ -15,7 +15,7 @@
     "preview": {
       "distribution": "internal",
       "node": "20.19.4",
-      "prebuildCommand": "bash ./.eas/build/pre-build.sh",
+      ,
       "env": {
         "EXPO_PUBLIC_APP_VARIANT": "preview"
       },
@@ -27,7 +27,7 @@
     "production": {
       "autoIncrement": true,
       "node": "20.19.4",
-      "prebuildCommand": "bash ./.eas/build/pre-build.sh",
+      ,
       "env": {
         "EXPO_PUBLIC_APP_VARIANT": "production"
       },
