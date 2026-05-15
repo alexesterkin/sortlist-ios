@@ -41,14 +41,25 @@ export function useDeepLinkHandler(isAuthed: boolean) {
       // a successful save. We hand the URL to the webview-bridge
       // singleton; the home-tab WebView either consumes it on mount
       // (cold start) or navigates to it via injectJavaScript (warm).
-      if (path === 'navigate' && isAuthed) {
+      //
+      // IMPORTANT: the URL push to the bridge must NOT be gated on
+      // isAuthed. On a cold start the deep-link's first handle() runs
+      // with isAuthed=false (AuthProvider hasn't hydrated yet); if we
+      // dropped the URL here it'd be lost forever. Stash it
+      // unconditionally — the bridge just stores until the WebView
+      // mounts and consumes it. Only the explicit router.replace is
+      // gated on isAuthed, because routing while unauthed would land
+      // the user on the login screen with the URL still pending.
+      if (path === 'navigate') {
         const target = safeNavigateUrl(
           (parsed.queryParams as Record<string, unknown> | null)?.url,
         );
         if (target) {
           setPendingWebViewUrl(target);
         }
-        router.replace('/(app)' as never);
+        if (isAuthed) {
+          router.replace('/(app)' as never);
+        }
         return;
       }
 

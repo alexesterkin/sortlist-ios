@@ -143,6 +143,11 @@ final class ShareViewController: UIViewController {
     private let successDetail = UILabel()
     private let goToListButton = UIButton(type: .system)
     private let backToRetailerButton = UIButton(type: .system)
+    // Selectable diagnostic showing the literal deep-link URL we'll hand
+    // to extensionContext.open when "Go to sortlist" is tapped. Lets the
+    // user copy-paste it for verification — particularly useful while
+    // we're still hunting the "opens retailer in Safari" bug.
+    private let deepLinkPreview = UITextView()
 
     // Error state (fatal)
     private let errorStack = UIStackView()
@@ -467,6 +472,20 @@ final class ShareViewController: UIViewController {
         backToRetailerButton.addTarget(self, action: #selector(onBackToRetailer), for: .touchUpInside)
         backToRetailerButton.translatesAutoresizingMaskIntoConstraints = false
 
+        // Selectable, monospaced. Sits below the buttons in tiny text so
+        // it doesn't crowd the visual but is copy-pasteable for debugging.
+        deepLinkPreview.isEditable = false
+        deepLinkPreview.isSelectable = true
+        deepLinkPreview.isScrollEnabled = false
+        deepLinkPreview.backgroundColor = .clear
+        deepLinkPreview.textContainer.lineFragmentPadding = 0
+        deepLinkPreview.textContainerInset = .zero
+        deepLinkPreview.dataDetectorTypes = []
+        deepLinkPreview.font = UIFont.monospacedSystemFont(ofSize: 9, weight: .regular)
+        deepLinkPreview.textColor = Self.inkMuted.withAlphaComponent(0.50)
+        deepLinkPreview.textAlignment = .center
+        deepLinkPreview.translatesAutoresizingMaskIntoConstraints = false
+
         successStack.axis = .vertical
         successStack.alignment = .fill
         successStack.spacing = 8
@@ -475,9 +494,11 @@ final class ShareViewController: UIViewController {
         successStack.addArrangedSubview(successDetail)
         successStack.addArrangedSubview(goToListButton)
         successStack.addArrangedSubview(backToRetailerButton)
+        successStack.addArrangedSubview(deepLinkPreview)
         successStack.setCustomSpacing(4, after: successCheckmark)
         successStack.setCustomSpacing(24, after: successDetail)
         successStack.setCustomSpacing(8, after: goToListButton)
+        successStack.setCustomSpacing(12, after: backToRetailerButton)
         successStack.translatesAutoresizingMaskIntoConstraints = false
         cardView.addSubview(successStack)
 
@@ -631,7 +652,14 @@ final class ShareViewController: UIViewController {
         case .success:
             titleLabel.text = "Saved!"
             if let name = savedCollectionName, !name.isEmpty {
-                successDetail.text = "Added to \(name)"
+                // Include the sortlist id so the user can verify which
+                // record was hit — useful when investigating the
+                // shared-sortlist save mismatch.
+                if let cid = savedCollectionId {
+                    successDetail.text = "Added to \(name) · id \(cid)"
+                } else {
+                    successDetail.text = "Added to \(name)"
+                }
                 goToListButton.setTitle("Go to \(name)", for: .normal)
             } else {
                 successDetail.text = "Added to Sortlist"
@@ -641,6 +669,16 @@ final class ShareViewController: UIViewController {
             // (shouldn't happen in practice but be defensive).
             goToListButton.isEnabled = (savedCollectionId != nil)
             goToListButton.alpha = goToListButton.isEnabled ? 1.0 : 0.5
+            // Populate the URL preview the user requested as a diagnostic.
+            // Show even when the button is disabled — useful to see what
+            // we *would* have opened.
+            if let cid = savedCollectionId {
+                deepLinkPreview.text = "will open: \(buildSortlistDeepLink(collectionId: cid).absoluteString)"
+                deepLinkPreview.isHidden = false
+            } else {
+                deepLinkPreview.text = nil
+                deepLinkPreview.isHidden = true
+            }
 
         case .error(let message, let detail):
             titleLabel.text = "Something went wrong"
@@ -1250,43 +1288,66 @@ final class ShareViewController: UIViewController {
         extensionContext?.cancelRequest(withError: NSError(domain: "user.cancel", code: 0))
     }
 
-    @objc private func onGoToList() {
-        guard let id = savedCollectionId else { return }
-        // Two-hop deep link:
-        //   1. sortlist://navigate?url=<encoded>   — handled by
-        //      lib/deep-link.ts in the React app.
-        //   2. The encoded URL is the actual web destination the
-        //      home-tab WebView should load.
-        // Deep-link handler validates the inner URL against an allowlist
-        // (sortlist.shop apex/www only) before forwarding to the WebView.
-        //
-        // Use a strict query-value char set (RFC 3986 unreserved) instead
-        // of CharacterSet.urlQueryAllowed because the latter passes "/",
-        // ":", "?", and "&" through untouched, leaving the embedded
-        // https:// URL ambiguous to whatever parses the deep link.
-        let webDestination = "\(Self.baseURL)/sortlist/\(id)"
+    /// Builds the deep-link URL we hand to extensionContext.open. Kept
+    /// as a single source of truth so the visible preview in the success
+    /// state and the actual open() invocation can't drift.
+    ///
+    /// Two-hop format: sortlist://navigate?url=<encoded https URL>.
+    /// lib/deep-link.ts on the JS side validates the inner URL against
+    /// a sortlist.shop allowlist, stashes it via lib/webview-bridge, and
+    /// the home-tab WebView consumes it on mount or via injectJavaScript.
+    ///
+    /// Inner URL uses RFC 3986 unreserved-only percent-encoding (NOT
+    /// CharacterSet.urlQueryAllowed) so embedded "/", ":", "?", and "&"
+    /// don't leak through and confuse the deep-link parser.
+    private func buildSortlistDeepLink(collectionId: Int) -> URL {
+        let webDestination = "\(Self.baseURL)/sortlist/\(collectionId)"
         var queryValueAllowed = CharacterSet.alphanumerics
         queryValueAllowed.insert(charactersIn: "-._~")
         let encoded = webDestination
             .addingPercentEncoding(withAllowedCharacters: queryValueAllowed) ?? webDestination
         let urlStr = "\(Self.appScheme)://navigate?url=\(encoded)"
-        guard let url = URL(string: urlStr) else {
-            dismissExtension()
-            return
-        }
-        didFinish = true
-        // NSExtensionContext.open is the documented API for a share
-        // extension to launch a URL — iOS uses our app's registered
-        // sortlist:// scheme handler to route it. The responder-chain
-        // openURL: hack previously used here is flaky on iOS 17+ and
-        // was the reason this button kept opening the retailer's
-        // website in Safari instead of the Sortlist app.
+        // The URL string is fully ASCII / percent-encoded by construction
+        // so URL(string:) should never return nil. The "?? webDestination
+        // again" path is just defensive.
+        return URL(string: urlStr) ?? URL(string: webDestination)!
+    }
+
+    @objc private func onGoToList() {
+        guard let id = savedCollectionId else { return }
+        let url = buildSortlistDeepLink(collectionId: id)
+
+        // NSExtensionContext.open is Apple's documented API for share
+        // extensions to launch a URL — iOS uses our app's registered
+        // sortlist:// scheme handler to route it. We DO NOT pre-dismiss
+        // the SE: if open() returns false (scheme unregistered, host
+        // app not installed, OS blocked the call), we want to stay on
+        // screen and surface the error to the user — not silently
+        // dismiss and look like the wrong thing happened.
         extensionContext?.open(url) { [weak self] success in
-            if !success {
-                NSLog("[SortlistShareExtension] extensionContext.open returned false for %@", url.absoluteString)
-            }
             DispatchQueue.main.async {
-                self?.extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
+                guard let self = self else { return }
+                if success {
+                    self.didFinish = true
+                    self.extensionContext?.completeRequest(
+                        returningItems: [],
+                        completionHandler: nil,
+                    )
+                } else {
+                    // Stay visible. Surface the diagnostic so the user
+                    // can copy the URL and tell us why iOS rejected it.
+                    NSLog("[SortlistShareExtension] extensionContext.open returned false for %@", url.absoluteString)
+                    self.state = .error(
+                        message: "Couldn't open the Sortlist app.",
+                        detail: """
+                        extensionContext.open returned false.
+                        URL we tried:
+                        \(url.absoluteString)
+
+                        Long-press to copy the URL and paste it back.
+                        """
+                    )
+                }
             }
         }
     }
