@@ -1,5 +1,5 @@
 import * as WebBrowser from 'expo-web-browser';
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, StyleSheet, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WebView, type WebViewNavigation } from 'react-native-webview';
@@ -10,6 +10,10 @@ import { Brand, Spacing } from '@/constants/theme';
 import { useAuth } from '@/lib/auth';
 import { API_BASE_URL } from '@/lib/config';
 import { getSessionToken, SESSION_COOKIE_NAME } from '@/lib/session';
+import {
+  consumePendingWebViewUrl,
+  registerWebViewNavigator,
+} from '@/lib/webview-bridge';
 
 const INTERNAL_HOSTS = new Set(['sortlist.shop', 'www.sortlist.shop']);
 
@@ -57,6 +61,28 @@ export default function WebTabScreen() {
   // redirects to the login screen, so this component unmounts before the
   // token can change.
   const token = getSessionToken();
+
+  // Pick up any URL the iOS Share Extension queued via the
+  // `sortlist://navigate?url=…` deep link. Consumed once on mount; the
+  // bridge clears itself. Hot-path navigation is wired in a useEffect
+  // below so the WebView can jump while it's already mounted.
+  const initialSourceUrl = useMemo(
+    () => consumePendingWebViewUrl() ?? API_BASE_URL,
+    [],
+  );
+
+  useEffect(() => {
+    registerWebViewNavigator((url) => {
+      // injectJavaScript runs in the WebView's main world. Using
+      // window.location.href triggers a normal navigation, so the
+      // same cookie/auth setup that worked for the initial load
+      // continues to apply.
+      webRef.current?.injectJavaScript(
+        `window.location.href = ${JSON.stringify(url)}; true;`,
+      );
+    });
+    return () => registerWebViewNavigator(null);
+  }, []);
 
   const injectedJavaScriptBeforeContentLoaded = useMemo(() => {
     if (!token) {
@@ -123,7 +149,7 @@ export default function WebTabScreen() {
     <SafeAreaView style={styles.root} edges={['top']}>
       <WebView
         ref={webRef}
-        source={{ uri: API_BASE_URL }}
+        source={{ uri: initialSourceUrl }}
         sharedCookiesEnabled
         thirdPartyCookiesEnabled
         injectedJavaScriptBeforeContentLoaded={injectedJavaScriptBeforeContentLoaded}
