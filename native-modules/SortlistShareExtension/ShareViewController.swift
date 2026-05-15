@@ -1273,3 +1273,15 @@ private extension Optional where Wrapped == String {
         return s
     }
 }
+
+// MARK: - Swift.Result<T, String> compatibility
+//
+// All the SE's networking helpers report failures as plain String messages,
+// which means their completion handlers want `Result<T, String>`. Swift's
+// stdlib Result requires Failure: Error, but String doesn't conform — so
+// we add the conformance here, scoped to this module (the share-extension
+// target is its own module, so this can't leak into the host app).
+//
+// @retroactive suppresses the Swift 5.9+ "you don't own this type" warning
+// that would otherwise show up on every build.
+extension String: @retroactive Error {}
