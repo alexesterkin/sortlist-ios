@@ -21,11 +21,17 @@ final class ShareViewController: UIViewController {
 
     // MARK: - Constants
 
-    /// Keychain access group must match `ios.entitlements.keychain-access-groups`
-    /// in the host app's app.json AND the SortlistShareExtension.entitlements
-    /// file that the config plugin writes. The bare value (no `$(AppIdentifierPrefix)`
-    /// prefix) is what SecItemCopyMatching wants — iOS prepends the team prefix.
-    private static let keychainAccessGroup = "com.alexesterkin.sortlist"
+    /// Keychain access group, LITERAL team-prefixed form. Apple's docs claim
+    /// iOS auto-prepends the team prefix when you pass the bare form, but
+    /// empirically (Build 9 diagnostic: scans C+E both reachable, primary
+    /// with bare form gets -34018) iOS does NOT auto-prepend at runtime. So
+    /// we have to spell out the team prefix.
+    ///
+    /// The entitlements XML file uses `$(AppIdentifierPrefix)com.alexesterkin.sortlist`
+    /// which Xcode expands at codesign time to this literal string. The
+    /// variable is NOT expanded at runtime — only in entitlement files
+    /// before signing.
+    private static let keychainAccessGroup = "WPX8584UDS.com.alexesterkin.sortlist"
     /// Must exactly match the value expo-secure-store stores under in the
     /// host app. expo-secure-store builds the kSecAttrService value as
     /// `<options.keychainService>:<auth|no-auth>` — we configure
@@ -474,44 +480,24 @@ final class ShareViewController: UIViewController {
         }
         line("")
 
-        // NOTE: tried SecTaskCopyValueForEntitlement(SecTaskCreateFromSelf(),…)
-        // here to dump iOS's actual runtime view of our entitlements (Build 8
-        // attempt), but Xcode 26's Swift module map does not expose the
-        // SecTask type or SecTaskCopyValueForEntitlement symbol — compile
-        // fails with "cannot find type 'SecTask' in scope". Scans C and D
-        // below provide enough signal to differentiate the remaining
-        // hypotheses without needing that runtime-introspection API.
-
-        // Scan C — SAME query as primary but with the access group spelled
-        // out with the EXPLICIT team prefix instead of the bare form. Apple
-        // docs say iOS auto-prepends the team prefix when you pass the bare
-        // form ("com.alexesterkin.sortlist" → "WPX8584UDS.com.alexesterkin.sortlist"),
-        // but if that auto-prepend isn't happening for some reason, this
-        // version should match the binary's literal entitlement string
-        // (which we confirmed from the IPA forensics contains exactly
-        // "WPX8584UDS.com.alexesterkin.sortlist").
+        // Build 9's diagnostic exposed two bugs at once:
         //
-        // Team prefix is hard-coded from the IPA dump — there's no clean
-        // Swift API to read it at runtime without SecTask. If a team change
-        // ever happens, update here.
-        let teamPrefix = "WPX8584UDS"
-        let teamPrefixedGroup = "\(teamPrefix).\(Self.keychainAccessGroup)"
-        let scanC: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.keychainService,
-            kSecAttrAccount as String: accountData,
-            kSecAttrAccessGroup as String: teamPrefixedGroup,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var scanCItem: AnyObject?
-        let scanCStatus = SecItemCopyMatching(scanC as CFDictionary, &scanCItem)
-        line("scan C (explicit team-prefixed group \(teamPrefixedGroup)):")
-        line("  OSStatus = \(scanCStatus) (\(Self.osStatusName(scanCStatus)))")
-        if scanCStatus == errSecSuccess {
-            line("  (matched — bare access group wasn't being auto-prepended!)")
-        }
-        line("")
+        //   1. iOS doesn't auto-prepend the team prefix when given a bare
+        //      access group. We now hard-code the prefixed form
+        //      "WPX8584UDS.com.alexesterkin.sortlist" in Self.keychainAccessGroup
+        //      (see top of file). The bare form `com.alexesterkin.sortlist`
+        //      returned -34018 errSecMissingEntitlement even though the binary's
+        //      signed entitlement contained the prefixed form.
+        //
+        //   2. The main app's SecureStore write was throwing -34018 from the
+        //      same bug and getting swallowed by writeSecure's catch, so the
+        //      JWT only ever made it to AsyncStorage. The Share Extension
+        //      can't read AsyncStorage. lib/session.ts now uses the prefixed
+        //      form too.
+        //
+        // Scans D and E below remain as regression checks — they don't depend
+        // on Self.keychainAccessGroup's exact form, so they keep working
+        // even if the access-group constant changes shape again.
 
         // Scan D — primary query but with NO kSecAttrAccessGroup key at all.
         // Per Apple docs, omitting this attribute makes iOS use the FIRST

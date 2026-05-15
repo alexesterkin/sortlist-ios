@@ -16,7 +16,23 @@ import * as SecureStore from 'expo-secure-store';
 // access group is unavailable). The main app keeps working either way;
 // the share extension only sees the token via SecureStore.
 
-const ACCESS_GROUP = 'com.alexesterkin.sortlist';
+// Keychain access group, in the LITERAL team-prefixed form. Apple's docs
+// claim iOS auto-prepends the team prefix when you pass the bare form,
+// but empirically (Build 9 diagnostic, scans C+E) iOS does NOT auto-prepend
+// on either read or write — bare `com.alexesterkin.sortlist` returns
+// errSecMissingEntitlement (-34018) from SecItemCopyMatching even when
+// the binary's signed entitlement contains `WPX8584UDS.com.alexesterkin.sortlist`.
+// So we must pass the prefixed form literally.
+//
+// The corresponding entitlements file (and app.json's
+// expo.ios.entitlements) uses `$(AppIdentifierPrefix)com.alexesterkin.sortlist`,
+// which Xcode expands at codesign time. The variable is NOT expanded at
+// runtime — we have to spell out the team prefix in code.
+//
+// Pre-fix: only AsyncStorage ever held the JWT because every SecureStore
+// write threw errSecMissingEntitlement and was silently caught in writeSecure;
+// the Share Extension (which has no AsyncStorage access) couldn't read it.
+const ACCESS_GROUP = 'WPX8584UDS.com.alexesterkin.sortlist';
 const TOKEN_KEY = 'sortlist.session_token';
 const LEGACY_COOKIE_KEY = 'sortlist.session_cookie'; // pre-rename users
 const COOKIE_NAME = 'app_session_id';
