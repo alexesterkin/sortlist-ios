@@ -472,6 +472,107 @@ final class ShareViewController: UIViewController {
         } else {
             line("  OSStatus = \(scanByGroupStatus) (\(Self.osStatusName(scanByGroupStatus)))")
         }
+        line("")
+
+        // ─── Runtime entitlements introspection ────────────────────────────
+        // Build 7's signed .appex binary has keychain-access-groups baked in
+        // (confirmed by extracting both XML 0xFADE7171 and DER 0xFADE7172
+        // entitlement blobs from the binary), but SecItemCopyMatching still
+        // returns errSecMissingEntitlement. So the question is whether iOS
+        // is actually *applying* the signed entitlements to the running
+        // process. SecTaskCopyValueForEntitlement asks iOS what entitlements
+        // it sees for THIS process right now. If keychain-access-groups
+        // comes back nil here, iOS is silently refusing to honor the signed
+        // blob — meaning the bug is in profile/signature validation at load
+        // time, not in the binary contents.
+        line("runtime entitlements (SecTaskCopyValueForEntitlement on self):")
+        let task: SecTask? = SecTaskCreateFromSelf(nil)
+        if task == nil {
+            line("  SecTaskCreateFromSelf returned nil — cannot introspect")
+        } else {
+            let runtimeKeys = [
+                "application-identifier",
+                "com.apple.developer.team-identifier",
+                "keychain-access-groups",
+                "get-task-allow",
+                "com.apple.security.application-groups",
+            ]
+            for key in runtimeKeys {
+                var err: Unmanaged<CFError>?
+                let raw = SecTaskCopyValueForEntitlement(task!, key as CFString, &err)
+                if let v = raw?.takeRetainedValue() {
+                    line("  \(key) = \(v)")
+                } else if let cfErr = err?.takeRetainedValue() {
+                    line("  \(key) = <error \(CFErrorGetCode(cfErr))>")
+                } else {
+                    line("  \(key) = <nil>")
+                }
+            }
+        }
+        line("")
+
+        // Derive the team prefix from the live application-identifier
+        // entitlement (e.g. "WPX8584UDS.com.alexesterkin.sortlist.ShareExtension"
+        // → "WPX8584UDS"). If iOS doesn't expose the entitlement at runtime,
+        // fall back to the hard-coded team for the literal-prefixed scan
+        // below — but flag the fallback so we know which path ran.
+        var derivedTeamPrefix: String? = nil
+        if let task = task {
+            if let appIdAny = SecTaskCopyValueForEntitlement(task, "application-identifier" as CFString, nil)?.takeRetainedValue(),
+               let appId = appIdAny as? String,
+               let dotIdx = appId.firstIndex(of: ".") {
+                derivedTeamPrefix = String(appId[..<dotIdx])
+            }
+        }
+
+        // Scan C — SAME query as primary but with the access group spelled
+        // out with the explicit team prefix instead of the bare form. Apple
+        // docs say iOS auto-prepends the team prefix when you pass the bare
+        // form, but if that auto-prepend isn't happening for some reason,
+        // this version should match the binary's literal entitlement string.
+        if let prefix = derivedTeamPrefix {
+            let teamPrefixedGroup = "\(prefix).\(Self.keychainAccessGroup)"
+            let scanC: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: Self.keychainService,
+                kSecAttrAccount as String: accountData,
+                kSecAttrAccessGroup as String: teamPrefixedGroup,
+                kSecReturnData as String: true,
+                kSecMatchLimit as String: kSecMatchLimitOne,
+            ]
+            var scanCItem: AnyObject?
+            let scanCStatus = SecItemCopyMatching(scanC as CFDictionary, &scanCItem)
+            line("scan C (explicit team-prefixed group \(teamPrefixedGroup)):")
+            line("  OSStatus = \(scanCStatus) (\(Self.osStatusName(scanCStatus)))")
+            if scanCStatus == errSecSuccess {
+                line("  (matched — bare access group wasn't being auto-prepended!)")
+            }
+        } else {
+            line("scan C: skipped — couldn't derive team prefix from runtime entitlements")
+        }
+        line("")
+
+        // Scan D — primary query but with NO kSecAttrAccessGroup key at all.
+        // Per Apple docs, omitting this attribute makes iOS use the FIRST
+        // group in the process's keychain-access-groups entitlement as the
+        // default. If this succeeds while the explicit-group scans all
+        // failed, the binary entitlement IS recognized but our explicit
+        // value isn't matching iOS's parsed form (possible team-id case
+        // mismatch, hidden whitespace, etc).
+        let scanD: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Self.keychainService,
+            kSecAttrAccount as String: accountData,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var scanDItem: AnyObject?
+        let scanDStatus = SecItemCopyMatching(scanD as CFDictionary, &scanDItem)
+        line("scan D (omit kSecAttrAccessGroup — uses default from entitlement):")
+        line("  OSStatus = \(scanDStatus) (\(Self.osStatusName(scanDStatus)))")
+        if scanDStatus == errSecSuccess {
+            line("  (matched — default-group access works; explicit-group lookup is the issue)")
+        }
 
         return .missing(diagnostic: diag.trimmingCharacters(in: .whitespacesAndNewlines))
     }
