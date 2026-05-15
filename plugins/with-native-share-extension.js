@@ -44,6 +44,7 @@ const EXTENSION_NAME = 'SortlistShareExtension';
 const SOURCE_DIR = 'native-modules/SortlistShareExtension';
 const SOURCE_FILES = [
   'ShareViewController.swift',
+  'ShareExtensionPreprocessor.js',
   'Info.plist',
   'SortlistShareExtension.entitlements',
 ];
@@ -121,6 +122,14 @@ function withExtensionXcodeTarget(config) {
     // Sources phase — only Swift file.
     const sourcesFileEntries = ['ShareViewController.swift'];
 
+    // Resources phase — the JS preprocessor file MUST be bundled inside
+    // the .appex's Resources/ directory so Info.plist's
+    // NSExtensionJavaScriptPreprocessingFile reference resolves at
+    // runtime. Without this, Safari skips the preprocessor entirely
+    // and the SE never gets the real window.location.href or the
+    // local OG scrape.
+    const resourceFileEntries = ['ShareExtensionPreprocessor.js'];
+
     // Frameworks the extension needs. UIKit / Foundation / Security come
     // with iOS — no pod work.
     const frameworkNames = ['UIKit.framework', 'Foundation.framework', 'Security.framework'];
@@ -140,7 +149,12 @@ function withExtensionXcodeTarget(config) {
     // build, but it's cleaner and pbxBuildPhase wants a group to add
     // files to).
     const pbxGroup = project.addPbxGroup(
-      [...sourcesFileEntries, 'Info.plist', `${EXTENSION_NAME}.entitlements`],
+      [
+        ...sourcesFileEntries,
+        ...resourceFileEntries,
+        'Info.plist',
+        `${EXTENSION_NAME}.entitlements`,
+      ],
       EXTENSION_NAME,
       EXTENSION_NAME,
     );
@@ -185,10 +199,11 @@ function withExtensionXcodeTarget(config) {
       project.addFramework(f, { target: target.uuid });
     }
 
-    // Empty resources phase — Info.plist isn't bundled as a resource;
-    // it's referenced via INFOPLIST_FILE.
+    // Resources phase — bundles ShareExtensionPreprocessor.js into the
+    // .appex's Resources/ directory. Info.plist isn't here because it's
+    // referenced via INFOPLIST_FILE, not as a bundled resource.
     addBuildPhaseIfMissing(project, target.uuid, {
-      files: [],
+      files: resourceFileEntries,
       type: 'PBXResourcesBuildPhase',
       name: 'Resources',
     });

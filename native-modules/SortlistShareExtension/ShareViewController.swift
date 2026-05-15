@@ -176,8 +176,18 @@ final class ShareViewController: UIViewController {
         state = .loading(message: "Reading shared link…")
         extractSharedItem { [weak self] in
             guard let self = self, let url = self.sharedURL else { return }
-            self.state = .loading(message: "Fetching product details…")
-            self.loadInitialData(url: url, jwt: token)
+            // We come out of extractSharedItem with the URL AND, when the
+            // user shared from Safari (the common path), with scraped data
+            // populated by the JS preprocessor — title, image, price, etc.
+            // Render the preview card IMMEDIATELY using whatever the JS
+            // gave us. Server-side meta.fetch and collections.list run
+            // in the background to fill in any gaps and the picker menu.
+            self.rebuildPickerMenu()
+            self.state = .ready
+            if let imgUrl = self.scrapedProduct?.imageUrl, !imgUrl.isEmpty {
+                self.loadProductImage(from: imgUrl)
+            }
+            self.loadBackgroundData(url: url, jwt: token)
         }
     }
 
@@ -804,98 +814,175 @@ final class ShareViewController: UIViewController {
             return
         }
 
+        for item in extensionContext.inputItems {
+            guard let extensionItem = item as? NSExtensionItem,
+                  let attachments = extensionItem.attachments else { continue }
+
+            // STEP 1: Look for a property-list attachment — that's the
+            // result of our JS preprocessor running in the page context.
+            // When the user shares from Safari this attachment is always
+            // present (Info.plist declares NSExtensionJavaScriptPreprocessingFile)
+            // and gives us window.location.href + locally-scraped OG/JSON-LD
+            // metadata. This path is preferred because:
+            //   (a) the URL is the actual page URL the user is on, not
+            //       the <link rel="canonical"> Safari otherwise passes
+            //       via UTType.url (fixes the "saved the category page,
+            //       not the product page" bug);
+            //   (b) the scraped data is instant — no server round-trip
+            //       needed to render the preview.
+            for provider in attachments {
+                if provider.hasItemConformingToTypeIdentifier(UTType.propertyList.identifier) {
+                    provider.loadItem(forTypeIdentifier: UTType.propertyList.identifier, options: nil) { [weak self] data, _ in
+                        DispatchQueue.main.async {
+                            guard let self = self else { return }
+                            // JS preprocessor results arrive wrapped:
+                            //   { NSExtensionJavaScriptPreprocessingResultsKey: { url, title, image, ... } }
+                            if let outer = data as? [String: Any],
+                               let inner = outer[NSExtensionJavaScriptPreprocessingResultsKey] as? [String: Any],
+                               let urlString = (inner["url"] as? String).nonEmpty {
+                                self.consumeJSPreprocessorResult(inner, fallbackUrl: urlString)
+                                completion()
+                                return
+                            }
+                            // Property list present but no usable URL —
+                            // fall through to URL/text providers.
+                            self.fallbackUrlExtraction(attachments: attachments, completion: completion)
+                        }
+                    }
+                    return
+                }
+            }
+
+            // STEP 2: No JS preprocessor attachment (user shared from a
+            // non-Safari surface, e.g. Notes / Messages / "Copy Link").
+            fallbackUrlExtraction(attachments: attachments, completion: completion)
+            return
+        }
+        state = .error(message: "Nothing shareable found.", detail: nil)
+    }
+
+    /// Stash the JS preprocessor's output as sharedURL + scrapedProduct.
+    /// The Swift side prefers JS values over server values, so anything
+    /// found here will shadow whatever meta.fetch returns later.
+    private func consumeJSPreprocessorResult(_ dict: [String: Any], fallbackUrl: String) {
+        sharedURL = (dict["url"] as? String).nonEmpty ?? fallbackUrl
+        scrapedProduct = ScrapedProduct(
+            title:    (dict["title"] as? String).nonEmpty,
+            imageUrl: (dict["image"] as? String).nonEmpty,
+            price:    (dict["price"] as? String).nonEmpty,
+            currency: (dict["currency"] as? String).nonEmpty,
+            siteName: (dict["siteName"] as? String).nonEmpty
+        )
+    }
+
+    /// Used when no JS preprocessor result is available (e.g. user shared
+    /// a URL from outside Safari). Walks the attachments looking for a
+    /// public.url or public.plain-text item and pulls the URL out of it.
+    private func fallbackUrlExtraction(
+        attachments: [NSItemProvider],
+        completion: @escaping () -> Void
+    ) {
         let setAndContinue: (String) -> Void = { [weak self] urlString in
             guard let self = self else { return }
             self.sharedURL = urlString
             completion()
         }
 
-        for item in extensionContext.inputItems {
-            guard let extensionItem = item as? NSExtensionItem,
-                  let attachments = extensionItem.attachments else { continue }
-            for provider in attachments {
-                if provider.hasItemConformingToTypeIdentifier(UTType.url.identifier) {
-                    provider.loadItem(forTypeIdentifier: UTType.url.identifier, options: nil) { data, _ in
-                        DispatchQueue.main.async {
-                            if let url = data as? URL {
-                                setAndContinue(url.absoluteString)
-                            } else if let str = data as? String, let parsed = URL(string: str) {
-                                setAndContinue(parsed.absoluteString)
-                            } else {
-                                self.state = .error(message: "Couldn't read shared URL.", detail: nil)
-                            }
+        for provider in attachments {
+            if provider.hasItemConformingToTypeIdentifier(UTType.url.identifier) {
+                provider.loadItem(forTypeIdentifier: UTType.url.identifier, options: nil) { [weak self] data, _ in
+                    DispatchQueue.main.async {
+                        guard let self = self else { return }
+                        if let url = data as? URL {
+                            setAndContinue(url.absoluteString)
+                        } else if let str = data as? String, let parsed = URL(string: str) {
+                            setAndContinue(parsed.absoluteString)
+                        } else {
+                            self.state = .error(message: "Couldn't read shared URL.", detail: nil)
                         }
                     }
-                    return
                 }
-                if provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier) {
-                    provider.loadItem(forTypeIdentifier: UTType.plainText.identifier, options: nil) { data, _ in
-                        DispatchQueue.main.async {
-                            if let text = data as? String,
-                               let range = text.range(of: #"https?://\S+"#, options: .regularExpression) {
-                                setAndContinue(String(text[range]))
-                            } else {
-                                self.state = .error(message: "No link found in shared text.", detail: nil)
-                            }
+                return
+            }
+            if provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier) {
+                provider.loadItem(forTypeIdentifier: UTType.plainText.identifier, options: nil) { [weak self] data, _ in
+                    DispatchQueue.main.async {
+                        guard let self = self else { return }
+                        if let text = data as? String,
+                           let range = text.range(of: #"https?://\S+"#, options: .regularExpression) {
+                            setAndContinue(String(text[range]))
+                        } else {
+                            self.state = .error(message: "No link found in shared text.", detail: nil)
                         }
                     }
-                    return
                 }
+                return
             }
         }
         state = .error(message: "Nothing shareable found.", detail: nil)
     }
 
-    // MARK: - Initial data load (parallel scrape + list)
+    // MARK: - Background data load
+    //
+    // Runs AFTER the ready state is already on screen, populated from the
+    // JS preprocessor result. Fills in two things:
+    //
+    //   collections.list — needed to populate the picker menu. Always
+    //     fired; on success we rebuild the menu in place. On failure
+    //     the picker just shows "Let AI decide" + "Create new sortlist…".
+    //
+    //   meta.fetch — only fired if the JS preprocessor came back missing
+    //     a key field (title or image). Server-side scrape has retailer
+    //     adapters / Playwright / LLM fallback that the local JS can't
+    //     match. We merge non-nil server values into any nil slots in
+    //     scrapedProduct, so anything the JS already got stays as
+    //     the source of truth.
 
-    private func loadInitialData(url: String, jwt: String) {
-        let group = DispatchGroup()
-        var scrape: ScrapedProduct? = nil
-        var lists: [Sortlist] = []
-        var scrapeErr: String? = nil
-        var listsErr: String? = nil
-
-        group.enter()
-        fetchScrapedProduct(url: url, jwt: jwt) { result in
-            switch result {
-            case .success(let p): scrape = p
-            case .failure(let msg): scrapeErr = msg
+    private func loadBackgroundData(url: String, jwt: String) {
+        fetchSortlists(jwt: jwt) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                switch result {
+                case .success(let ls):
+                    self.sortlists = ls
+                    self.rebuildPickerMenu()
+                case .failure(let msg):
+                    NSLog("[SortlistShareExtension] collections.list failed: %@", msg)
+                }
             }
-            group.leave()
         }
 
-        group.enter()
-        fetchSortlists(jwt: jwt) { result in
-            switch result {
-            case .success(let ls): lists = ls
-            case .failure(let msg): listsErr = msg
-            }
-            group.leave()
+        let jsCovered = scrapedProduct?.title != nil
+            && scrapedProduct?.imageUrl != nil
+        if jsCovered {
+            // JS preprocessor already produced title + image. Save the
+            // ~3-15s Playwright/LLM round-trip and skip the server scrape.
+            return
         }
 
-        group.notify(queue: .main) { [weak self] in
-            guard let self = self else { return }
-
-            // Sortlists failure is non-fatal — picker just shows AI + create.
-            if let err = listsErr {
-                NSLog("[SortlistShareExtension] collections.list failed: %@", err)
-            }
-            self.sortlists = lists
-
-            // Scrape failure is non-fatal — render the card with URL fallback.
-            self.scrapedProduct = scrape
-            if let err = scrapeErr {
-                NSLog("[SortlistShareExtension] meta.fetch failed: %@", err)
-                // Don't block the save flow. The user can still save the URL
-                // even if we couldn't get a preview.
-            }
-
-            self.rebuildPickerMenu()
-            self.state = .ready
-
-            // Image loads after we render the card, async.
-            if let imgUrl = scrape?.imageUrl, !imgUrl.isEmpty {
-                self.loadProductImage(from: imgUrl)
+        fetchScrapedProduct(url: url, jwt: jwt) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                switch result {
+                case .success(let server):
+                    // Merge: prefer the JS preprocessor values where
+                    // present, fill in nils from the server result.
+                    let merged = ScrapedProduct(
+                        title:    self.scrapedProduct?.title    ?? server.title,
+                        imageUrl: self.scrapedProduct?.imageUrl ?? server.imageUrl,
+                        price:    self.scrapedProduct?.price    ?? server.price,
+                        currency: self.scrapedProduct?.currency ?? server.currency,
+                        siteName: self.scrapedProduct?.siteName ?? server.siteName
+                    )
+                    self.scrapedProduct = merged
+                    self.renderProductCard()
+                    if self.productImageView.image == nil,
+                       let imgUrl = merged.imageUrl, !imgUrl.isEmpty {
+                        self.loadProductImage(from: imgUrl)
+                    }
+                case .failure(let msg):
+                    NSLog("[SortlistShareExtension] meta.fetch failed: %@", msg)
+                }
             }
         }
     }
@@ -1166,30 +1253,41 @@ final class ShareViewController: UIViewController {
     @objc private func onGoToList() {
         guard let id = savedCollectionId else { return }
         // Two-hop deep link:
-        //   1. sortlist://navigate?url=...   — handled by lib/deep-link.ts
-        //                                       in the React app.
-        //   2. The encoded URL is the actual web destination the home-tab
-        //      WebView should load.
+        //   1. sortlist://navigate?url=<encoded>   — handled by
+        //      lib/deep-link.ts in the React app.
+        //   2. The encoded URL is the actual web destination the
+        //      home-tab WebView should load.
         // Deep-link handler validates the inner URL against an allowlist
-        // (sortlist.shop apex/www only) before forwarding to the WebView,
-        // so a hostile re-use of this scheme can't redirect to arbitrary
-        // domains.
+        // (sortlist.shop apex/www only) before forwarding to the WebView.
+        //
+        // Use a strict query-value char set (RFC 3986 unreserved) instead
+        // of CharacterSet.urlQueryAllowed because the latter passes "/",
+        // ":", "?", and "&" through untouched, leaving the embedded
+        // https:// URL ambiguous to whatever parses the deep link.
         let webDestination = "\(Self.baseURL)/sortlist/\(id)"
-        let allowed = CharacterSet.urlQueryAllowed
-        let encoded = webDestination.addingPercentEncoding(withAllowedCharacters: allowed) ?? webDestination
+        var queryValueAllowed = CharacterSet.alphanumerics
+        queryValueAllowed.insert(charactersIn: "-._~")
+        let encoded = webDestination
+            .addingPercentEncoding(withAllowedCharacters: queryValueAllowed) ?? webDestination
         let urlStr = "\(Self.appScheme)://navigate?url=\(encoded)"
         guard let url = URL(string: urlStr) else {
-            // Last resort — just dismiss.
             dismissExtension()
             return
         }
-        // Apple's only blessed way for a share extension to open a URL in
-        // the host app. We complete first, then open — that matches the
-        // pattern Apple recommends for "I'm done, but route the user
-        // somewhere else."
         didFinish = true
-        extensionContext?.completeRequest(returningItems: []) { _ in
-            self.openURLViaResponderChain(url)
+        // NSExtensionContext.open is the documented API for a share
+        // extension to launch a URL — iOS uses our app's registered
+        // sortlist:// scheme handler to route it. The responder-chain
+        // openURL: hack previously used here is flaky on iOS 17+ and
+        // was the reason this button kept opening the retailer's
+        // website in Safari instead of the Sortlist app.
+        extensionContext?.open(url) { [weak self] success in
+            if !success {
+                NSLog("[SortlistShareExtension] extensionContext.open returned false for %@", url.absoluteString)
+            }
+            DispatchQueue.main.async {
+                self?.extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
+            }
         }
     }
 
@@ -1203,22 +1301,6 @@ final class ShareViewController: UIViewController {
         if didFinish { return }
         didFinish = true
         extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
-    }
-
-    /// Walk the responder chain looking for an object that handles
-    /// `openURL:` — UIApplication does, but app extensions can't reference
-    /// it directly. This is the historical workaround; still works on
-    /// iOS 26.
-    private func openURLViaResponderChain(_ url: URL) {
-        var responder: UIResponder? = self
-        let selector = sel_registerName("openURL:")
-        while let r = responder {
-            if r.responds(to: selector) {
-                r.perform(selector, with: url)
-                return
-            }
-            responder = r.next
-        }
     }
 
     // MARK: - Keychain (JWT read)
