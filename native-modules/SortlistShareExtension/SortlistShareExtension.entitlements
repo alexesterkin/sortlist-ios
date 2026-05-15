@@ -6,5 +6,19 @@
 	<array>
 		<string>$(AppIdentifierPrefix)com.alexesterkin.sortlist</string>
 	</array>
+	<!--
+	  Associated domains for Universal Links. The main app already declares
+	  these (visible in the signed entitlements blob of Build 7+). The
+	  Share Extension declares them too as belt-and-braces so iOS treats
+	  the SE's calls into extensionContext.open(https://www.sortlist.shop/…)
+	  as in-app navigation rather than cross-app, and so any future code
+	  path that needs to RESOLVE a universal link from inside the SE
+	  (rare but possible) works.
+	-->
+	<key>com.apple.developer.associated-domains</key>
+	<array>
+		<string>applinks:sortlist.shop</string>
+		<string>applinks:www.sortlist.shop</string>
+	</array>
 </dict>
 </plist>
