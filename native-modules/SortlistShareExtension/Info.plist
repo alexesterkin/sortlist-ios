@@ -53,5 +53,22 @@
 		<key>NSExtensionPrincipalClass</key>
 		<string>$(PRODUCT_MODULE_NAME).ShareViewController</string>
 	</dict>
+	<!--
+	  iOS 9+ requires every URL scheme that an app extension might open
+	  (via extensionContext.open or canOpenURL) to be declared here.
+	  Build 14's diagnostic confirmed extensionContext.open(sortlist://…)
+	  returned false even though the parent app correctly registers the
+	  scheme — the extension is a separate bundle and inherits NONE of
+	  the parent's CFBundleURLTypes for purposes of open().
+	  We declare both the custom sortlist scheme (in case Apple ever
+	  un-broke that path) and https — Build 15 pivots to Universal
+	  Links as the primary deep-link, which goes via the https scheme
+	  and is far more reliable.
+	-->
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>sortlist</string>
+		<string>https</string>
+	</array>
 </dict>
 </plist>

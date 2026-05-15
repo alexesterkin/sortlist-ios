@@ -99,9 +99,15 @@ final class ShareViewController: UIViewController {
         didSet { renderState() }
     }
 
-    // Outcome after save (used by the success screen)
+    // Outcome after save (used by the success screen).
+    // savedProductId / savedProductUserId are shown in the success-state
+    // diagnostic so the user can verify on the server what was actually
+    // written — critical for debugging the "shared sortlist save"
+    // mismatch.
     private var savedCollectionId: Int?
     private var savedCollectionName: String?
+    private var savedProductId: Int?
+    private var savedProductUserId: Int?
 
     // MARK: - Subviews
 
@@ -669,16 +675,26 @@ final class ShareViewController: UIViewController {
             // (shouldn't happen in practice but be defensive).
             goToListButton.isEnabled = (savedCollectionId != nil)
             goToListButton.alpha = goToListButton.isEnabled ? 1.0 : 0.5
-            // Populate the URL preview the user requested as a diagnostic.
-            // Show even when the button is disabled — useful to see what
-            // we *would* have opened.
+            // Diagnostic block. Two lines:
+            //   1. The literal URL we'll hand to extensionContext.open
+            //      when Go-To is tapped. Useful for verifying the deep
+            //      link target is well-formed before the user taps.
+            //   2. The product / user / collection ids straight from the
+            //      products.add response. If userId != the saver's
+            //      account, OR if collectionId != the picked sortlist
+            //      id, that's the smoking gun for the shared-sortlist
+            //      save mismatch.
+            var diag = ""
             if let cid = savedCollectionId {
-                deepLinkPreview.text = "will open: \(buildSortlistDeepLink(collectionId: cid).absoluteString)"
-                deepLinkPreview.isHidden = false
-            } else {
-                deepLinkPreview.text = nil
-                deepLinkPreview.isHidden = true
+                let url = buildSortlistDeepLink(collectionId: cid).absoluteString
+                diag += "will open: \(url)\n"
             }
+            let pid = savedProductId.map(String.init) ?? "?"
+            let puid = savedProductUserId.map(String.init) ?? "?"
+            let scid = savedCollectionId.map(String.init) ?? "?"
+            diag += "saved: product=\(pid) user=\(puid) collection=\(scid)"
+            deepLinkPreview.text = diag
+            deepLinkPreview.isHidden = false
 
         case .error(let message, let detail):
             titleLabel.text = "Something went wrong"
@@ -1098,7 +1114,20 @@ final class ShareViewController: UIViewController {
         }.resume()
     }
 
-    private func saveProduct(completion: @escaping (Result<(collectionId: Int?, collectionName: String?), String>) -> Void) {
+    /// Outcome the SE shows on the success screen. All four fields come
+    /// from the products.add response and feed both the user-visible
+    /// "Added to <name>" message AND the diagnostic line that helps
+    /// debug the shared-sortlist mismatch (we surface productUserId
+    /// alongside collectionId so the user can spot the exact moment
+    /// userId != collection.ownerId).
+    struct SaveOutcome {
+        var collectionId: Int?
+        var collectionName: String?
+        var productId: Int?
+        var productUserId: Int?
+    }
+
+    private func saveProduct(completion: @escaping (Result<SaveOutcome, String>) -> Void) {
         guard let url = sharedURL, let token = jwt else {
             completion(.failure("missing url/jwt"))
             return
@@ -1147,24 +1176,38 @@ final class ShareViewController: UIViewController {
             let product = result["product"] as? [String: Any]
             let aiSuggestion = result["aiSuggestion"] as? [String: Any]
 
-            var collectionId: Int? = nil
-            var collectionName: String? = nil
+            var outcome = SaveOutcome()
 
             if let cid = product?["collectionId"] as? Int {
-                collectionId = cid
+                outcome.collectionId = cid
             } else if let cid = aiSuggestion?["assignedSortlistId"] as? Int {
-                collectionId = cid
+                outcome.collectionId = cid
             } else if let cid = aiSuggestion?["sortlistId"] as? Int {
-                collectionId = cid
+                outcome.collectionId = cid
             }
+
+            // Capture the product's own id + userId for the diagnostic.
+            // These come straight from the DB row — if userId differs
+            // from what the SE thinks the session user is, that's a
+            // smoking gun for the shared-sortlist save bug.
+            outcome.productId = product?["id"] as? Int
+            outcome.productUserId = product?["userId"] as? Int
 
             // Name: prefer the AI's "newSortlistName" (it created one),
             // else look up the existing list we picked, else null.
             if let name = aiSuggestion?["newSortlistName"] as? String, !name.isEmpty {
-                collectionName = name
+                outcome.collectionName = name
             }
 
-            completion(.success((collectionId: collectionId, collectionName: collectionName)))
+            // Log to NSLog too in case the user can pull device logs later.
+            NSLog(
+                "[SortlistShareExtension] products.add OK product=%@ user=%@ collection=%@",
+                outcome.productId.map(String.init) ?? "?",
+                outcome.productUserId.map(String.init) ?? "?",
+                outcome.collectionId.map(String.init) ?? "?"
+            )
+
+            completion(.success(outcome))
         }
     }
 
@@ -1258,6 +1301,8 @@ final class ShareViewController: UIViewController {
                 case .success(let outcome):
                     self.savedCollectionId = outcome.collectionId
                     self.savedCollectionName = outcome.collectionName ?? self.fallbackCollectionName()
+                    self.savedProductId = outcome.productId
+                    self.savedProductUserId = outcome.productUserId
                     self.state = .success
                 case .failure(let message):
                     self.state = .ready
@@ -1288,29 +1333,32 @@ final class ShareViewController: UIViewController {
         extensionContext?.cancelRequest(withError: NSError(domain: "user.cancel", code: 0))
     }
 
-    /// Builds the deep-link URL we hand to extensionContext.open. Kept
-    /// as a single source of truth so the visible preview in the success
-    /// state and the actual open() invocation can't drift.
+    /// Builds the deep-link URL we hand to extensionContext.open.
     ///
-    /// Two-hop format: sortlist://navigate?url=<encoded https URL>.
-    /// lib/deep-link.ts on the JS side validates the inner URL against
-    /// a sortlist.shop allowlist, stashes it via lib/webview-bridge, and
-    /// the home-tab WebView consumes it on mount or via injectJavaScript.
+    /// Universal Link, NOT the custom sortlist:// scheme. Reasoning:
+    /// Build 14's diagnostic showed extensionContext.open(sortlist://…)
+    /// returning false — share extensions live in a sandbox where iOS
+    /// is increasingly restrictive about which schemes you can open,
+    /// and the custom-scheme path has been unreliable for us across
+    /// iOS 17/26. Universal Links are the documented escape hatch:
     ///
-    /// Inner URL uses RFC 3986 unreserved-only percent-encoding (NOT
-    /// CharacterSet.urlQueryAllowed) so embedded "/", ":", "?", and "&"
-    /// don't leak through and confuse the deep-link parser.
+    ///   - https://www.sortlist.shop/sortlist/<id> is a real route
+    ///     on the deployed web app (verified: HTTP 200).
+    ///   - The host app declares applinks:sortlist.shop +
+    ///     applinks:www.sortlist.shop in its associated-domains
+    ///     entitlement (visible in the signed entitlements blob).
+    ///   - When AASA on the server is configured to map this path to
+    ///     our app's bundle id, iOS routes the URL to the app, the
+    ///     deep-link handler picks it up, and the WebView lands on
+    ///     the sortlist page.
+    ///   - When AASA isn't configured (or doesn't match), iOS falls
+    ///     back to opening the URL in Safari — the user still lands
+    ///     on the right sortlist page, just on the web. Much better
+    ///     than the previous "open() returns false → error card"
+    ///     dead end.
     private func buildSortlistDeepLink(collectionId: Int) -> URL {
-        let webDestination = "\(Self.baseURL)/sortlist/\(collectionId)"
-        var queryValueAllowed = CharacterSet.alphanumerics
-        queryValueAllowed.insert(charactersIn: "-._~")
-        let encoded = webDestination
-            .addingPercentEncoding(withAllowedCharacters: queryValueAllowed) ?? webDestination
-        let urlStr = "\(Self.appScheme)://navigate?url=\(encoded)"
-        // The URL string is fully ASCII / percent-encoded by construction
-        // so URL(string:) should never return nil. The "?? webDestination
-        // again" path is just defensive.
-        return URL(string: urlStr) ?? URL(string: webDestination)!
+        let urlStr = "\(Self.baseURL)/sortlist/\(collectionId)"
+        return URL(string: urlStr)!
     }
 
     @objc private func onGoToList() {

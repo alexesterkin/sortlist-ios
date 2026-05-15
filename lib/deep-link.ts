@@ -27,6 +27,28 @@ export function useDeepLinkHandler(isAuthed: boolean) {
   useEffect(() => {
     const handle = (incomingUrl: string | null) => {
       if (!incomingUrl) return;
+
+      // Universal Link path: incoming URL is itself an https://sortlist.shop
+      // URL, delivered by iOS via the associated-domains entitlement.
+      // This is the primary "Go to sortlist" path from Build 15 onward —
+      // the SE produces a Universal Link instead of a custom scheme URL
+      // because extensionContext.open(sortlist://…) was returning false.
+      //
+      // We push the URL straight to the webview-bridge (unconditionally,
+      // see auth-race note below) and trust that the bridge + the WebView
+      // already know how to load sortlist.shop URLs safely. Only the
+      // explicit router.replace home is gated on isAuthed, so an unauthed
+      // open lands the user on the login screen with the URL queued and
+      // ready to fire once they're authed.
+      const directTarget = safeNavigateUrl(incomingUrl);
+      if (directTarget) {
+        setPendingWebViewUrl(directTarget);
+        if (isAuthed) {
+          router.replace('/(app)' as never);
+        }
+        return;
+      }
+
       let parsed: ReturnType<typeof Linking.parse>;
       try {
         parsed = Linking.parse(incomingUrl);
@@ -37,19 +59,10 @@ export function useDeepLinkHandler(isAuthed: boolean) {
 
       // sortlist://navigate?url=<https://www.sortlist.shop/...>
       //
-      // Fired by the iOS Share Extension's "Go to sortlist" button after
-      // a successful save. We hand the URL to the webview-bridge
-      // singleton; the home-tab WebView either consumes it on mount
-      // (cold start) or navigates to it via injectJavaScript (warm).
-      //
-      // IMPORTANT: the URL push to the bridge must NOT be gated on
-      // isAuthed. On a cold start the deep-link's first handle() runs
-      // with isAuthed=false (AuthProvider hasn't hydrated yet); if we
-      // dropped the URL here it'd be lost forever. Stash it
-      // unconditionally — the bridge just stores until the WebView
-      // mounts and consumes it. Only the explicit router.replace is
-      // gated on isAuthed, because routing while unauthed would land
-      // the user on the login screen with the URL still pending.
+      // Legacy fallback path retained for builds older than 15 that
+      // still ship the custom-scheme deep link. New builds use the
+      // Universal Link branch above. Same auth-race rule applies —
+      // stash the URL unconditionally, gate only the home redirect.
       if (path === 'navigate') {
         const target = safeNavigateUrl(
           (parsed.queryParams as Record<string, unknown> | null)?.url,
