@@ -84,10 +84,6 @@
                   "entitlements": {
                     "keychain-access-groups": [
                       "$(AppIdentifierPrefix)com.alexesterkin.sortlist"
-                    ],
-                    "com.apple.developer.associated-domains": [
-                      "applinks:sortlist.shop",
-                      "applinks:www.sortlist.shop"
                     ]
                   }
                 }

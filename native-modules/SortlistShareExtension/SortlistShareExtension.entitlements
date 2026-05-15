@@ -7,18 +7,24 @@
 		<string>$(AppIdentifierPrefix)com.alexesterkin.sortlist</string>
 	</array>
 	<!--
-	  Associated domains for Universal Links. The main app already declares
-	  these (visible in the signed entitlements blob of Build 7+). The
-	  Share Extension declares them too as belt-and-braces so iOS treats
-	  the SE's calls into extensionContext.open(https://www.sortlist.shop/…)
-	  as in-app navigation rather than cross-app, and so any future code
-	  path that needs to RESOLVE a universal link from inside the SE
-	  (rare but possible) works.
+	  NOTE on Associated Domains: we briefly added them here in Build 16,
+	  hoping to back the iOS Universal Link path with the SE having matching
+	  entitlements. The build failed at the codesign step with:
+	      Provisioning profile "[…SortlistShareExtension…]" doesn't
+	      include the com.apple.developer.associated-domains entitlement.
+	  Same class of issue as the keychain-access-groups saga: Associated
+	  Domains is a capability that has to be enabled on the App ID in
+	  Apple Developer portal before the provisioning profile will grant it,
+	  and EAS doesn't auto-sync it. Functionally it's also unnecessary:
+	  the main app's associated-domains entitlement (already in the
+	  signed main-app binary) is what makes iOS route incoming Universal
+	  Links into our app. The SE doesn't need its own entitlement to
+	  call extensionContext.open() on an HTTPS URL — iOS dispatches the
+	  URL to whichever app's AASA matches, which is the main app.
+	  Leaving the entry commented here as the historical record. If we
+	  ever do want SE-level Universal Link HANDLING (rare; we don't
+	  currently), enable the capability on the SE's App ID in Apple
+	  Developer portal first.
 	-->
-	<key>com.apple.developer.associated-domains</key>
-	<array>
-		<string>applinks:sortlist.shop</string>
-		<string>applinks:www.sortlist.shop</string>
-	</array>
 </dict>
 </plist>
