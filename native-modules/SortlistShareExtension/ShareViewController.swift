@@ -1363,41 +1363,117 @@ final class ShareViewController: UIViewController {
 
     @objc private func onGoToList() {
         guard let id = savedCollectionId else { return }
-        let url = buildSortlistDeepLink(collectionId: id)
+        let universalLink = buildSortlistDeepLink(collectionId: id)
+        let schemeOnly = URL(string: "\(Self.appScheme)://")!
 
-        // NSExtensionContext.open is Apple's documented API for share
-        // extensions to launch a URL — iOS uses our app's registered
-        // sortlist:// scheme handler to route it. We DO NOT pre-dismiss
-        // the SE: if open() returns false (scheme unregistered, host
-        // app not installed, OS blocked the call), we want to stay on
-        // screen and surface the error to the user — not silently
-        // dismiss and look like the wrong thing happened.
-        extensionContext?.open(url) { [weak self] success in
+        // The order matters. From Apple Forums thread 773342 (Apple
+        // Frameworks Engineer, 2024): NSExtensionContext.open() is
+        // Today-widget-only. Build 14 + Build 17 both proved this
+        // empirically — open() returned false for both the custom
+        // scheme AND a Universal Link with a confirmed-correct AASA.
+        //
+        // The responder-chain UIApplication.openURL: trick is the
+        // only mechanism that works for "share extension wants to
+        // open its host app" on iOS 17/26. expo-share-intent and
+        // Flutter's receive_sharing_intent both ship this in
+        // App Store binaries today. Apple DTS calls it a "Silly
+        // Runtime Hack" but does not call it private API.
+        //
+        // We try in priority order:
+        //   1. responder-chain openURL: with the Universal Link —
+        //      best case, the URL is delivered to the host app via
+        //      continueUserActivity / Linking and the WebView lands
+        //      on the right sortlist page.
+        //   2. responder-chain openURL: with the bare custom scheme
+        //      sortlist:// — lower-info, but lands the user in the
+        //      host app at minimum.
+        //   3. extensionContext.open() — kept as a documentation
+        //      fallback; will almost certainly fail same as before.
+        //
+        // We pre-set didFinish so the success-state UI doesn't react
+        // weirdly while the open is in flight; if all paths fail we
+        // clear it and transition to the error state with a full
+        // diagnostic listing every attempted URL and outcome.
+
+        didFinish = true
+
+        if openHostAppViaResponderChain(url: universalLink) {
+            extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
+            return
+        }
+        if openHostAppViaResponderChain(url: schemeOnly) {
+            extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
+            return
+        }
+
+        // Last resort. Almost certainly returns false on iOS 14+ for
+        // a Share Extension, but surfaces a definitive yes/no in the
+        // diagnostic if it ever does work.
+        extensionContext?.open(universalLink) { [weak self] success in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 if success {
-                    self.didFinish = true
-                    self.extensionContext?.completeRequest(
-                        returningItems: [],
-                        completionHandler: nil,
-                    )
+                    self.extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
                 } else {
-                    // Stay visible. Surface the diagnostic so the user
-                    // can copy the URL and tell us why iOS rejected it.
-                    NSLog("[SortlistShareExtension] extensionContext.open returned false for %@", url.absoluteString)
+                    self.didFinish = false
                     self.state = .error(
                         message: "Couldn't open the Sortlist app.",
                         detail: """
-                        extensionContext.open returned false.
-                        URL we tried:
-                        \(url.absoluteString)
+                        All three open paths failed.
 
-                        Long-press to copy the URL and paste it back.
+                        1. responder-chain UIApplication.openURL: \
+                        with \(universalLink.absoluteString)
+                           — no UIResponder in the chain responded to openURL:
+                        2. responder-chain UIApplication.openURL: \
+                        with \(schemeOnly.absoluteString)
+                           — no UIResponder in the chain responded to openURL:
+                        3. extensionContext.open with \(universalLink.absoluteString)
+                           — returned false (Apple's documented Today-widget-only restriction).
+
+                        Long-press to copy.
                         """
                     )
                 }
             }
         }
+    }
+
+    /// Walks the SE's UIResponder chain looking for any responder that
+    /// responds to the `openURL:` selector, then `perform`s it with the
+    /// supplied URL. This is the responder-chain UIApplication.openURL:
+    /// trick that's the documented working pattern for "extension wants
+    /// to open its host app" since NSExtensionContext.open is
+    /// Today-widget-only (Apple Forums thread 773342, 2024).
+    ///
+    /// We start at `self.next` rather than `self` so we never call
+    /// a method we'd defined on ourselves. The selector is looked up
+    /// at runtime via `sel_registerName` rather than `#selector(...)`
+    /// to avoid needing an @objc stub on the class.
+    ///
+    /// Returns true if we found a responder and dispatched the call;
+    /// false if the chain had no openURL: target at all (which would
+    /// be very unusual — at minimum the UIApplication subclass for
+    /// app-extension hosts responds to it).
+    private func openHostAppViaResponderChain(url: URL) -> Bool {
+        let selector = sel_registerName("openURL:")
+        var responder: UIResponder? = self.next
+        while let r = responder {
+            if r.responds(to: selector) {
+                _ = r.perform(selector, with: url)
+                NSLog(
+                    "[SortlistShareExtension] responder-chain openURL: dispatched to %@ url=%@",
+                    String(describing: type(of: r)),
+                    url.absoluteString
+                )
+                return true
+            }
+            responder = r.next
+        }
+        NSLog(
+            "[SortlistShareExtension] responder-chain: NO openURL: target found for %@",
+            url.absoluteString
+        )
+        return false
     }
 
     @objc private func onBackToRetailer() {
