@@ -44,7 +44,6 @@ final class ShareViewController: UIViewController {
 
     // Backend
     private static let baseURL = "https://www.sortlist.shop"
-    private static let appScheme = "sortlist"  // matches expo.scheme in app.json
 
     // Brand colors (must match the React app's tokens — see lib/theme.ts there)
     private static let coral       = UIColor(red: 1.000, green: 0.357, blue: 0.227, alpha: 1.0)
@@ -100,14 +99,8 @@ final class ShareViewController: UIViewController {
     }
 
     // Outcome after save (used by the success screen).
-    // savedProductId / savedProductUserId are shown in the success-state
-    // diagnostic so the user can verify on the server what was actually
-    // written — critical for debugging the "shared sortlist save"
-    // mismatch.
     private var savedCollectionId: Int?
     private var savedCollectionName: String?
-    private var savedProductId: Int?
-    private var savedProductUserId: Int?
 
     // MARK: - Subviews
 
@@ -142,18 +135,18 @@ final class ShareViewController: UIViewController {
     private let cancelButton = UIButton(type: .system)
     private let inlineError = UILabel()
 
-    // Success state
+    // Success state — minimal, no buttons. Auto-dismisses 1s after
+    // landing here so the user goes straight back to Safari (or
+    // wherever they shared from). All the previous open-app machinery
+    // (responder-chain UIApplication.openURL:, Universal Links,
+    // extensionContext.open, deep-link preview, the "Go to sortlist"
+    // and "Back to where you were" buttons) is removed — share extensions
+    // can't reliably open their host app on iOS 17/26 and the explicit
+    // call here is simpler and friction-free.
     private let successStack = UIStackView()
     private let successCheckmark = UILabel()
     private let successHeadline = UILabel()
     private let successDetail = UILabel()
-    private let goToListButton = UIButton(type: .system)
-    private let backToRetailerButton = UIButton(type: .system)
-    // Selectable diagnostic showing the literal deep-link URL we'll hand
-    // to extensionContext.open when "Go to sortlist" is tapped. Lets the
-    // user copy-paste it for verification — particularly useful while
-    // we're still hunting the "opens retailer in Safari" bug.
-    private let deepLinkPreview = UITextView()
 
     // Error state (fatal)
     private let errorStack = UIStackView()
@@ -453,7 +446,7 @@ final class ShareViewController: UIViewController {
 
     private func buildSuccessState() {
         successCheckmark.text = "✓"
-        successCheckmark.font = UIFont.systemFont(ofSize: 42, weight: .bold)
+        successCheckmark.font = UIFont.systemFont(ofSize: 56, weight: .bold)
         successCheckmark.textColor = Self.successHue
         successCheckmark.textAlignment = .center
         successCheckmark.translatesAutoresizingMaskIntoConstraints = false
@@ -464,33 +457,11 @@ final class ShareViewController: UIViewController {
         successHeadline.textAlignment = .center
         successHeadline.translatesAutoresizingMaskIntoConstraints = false
 
-        successDetail.font = UIFont.systemFont(ofSize: 14)
+        successDetail.font = UIFont.systemFont(ofSize: 15)
         successDetail.textColor = Self.inkMuted
         successDetail.textAlignment = .center
         successDetail.numberOfLines = 0
         successDetail.translatesAutoresizingMaskIntoConstraints = false
-
-        styleCoralPrimary(goToListButton, title: "Go to sortlist")
-        goToListButton.addTarget(self, action: #selector(onGoToList), for: .touchUpInside)
-        goToListButton.translatesAutoresizingMaskIntoConstraints = false
-
-        styleTextButton(backToRetailerButton, title: "Back to where you were")
-        backToRetailerButton.addTarget(self, action: #selector(onBackToRetailer), for: .touchUpInside)
-        backToRetailerButton.translatesAutoresizingMaskIntoConstraints = false
-
-        // Selectable, monospaced. Sits below the buttons in tiny text so
-        // it doesn't crowd the visual but is copy-pasteable for debugging.
-        deepLinkPreview.isEditable = false
-        deepLinkPreview.isSelectable = true
-        deepLinkPreview.isScrollEnabled = false
-        deepLinkPreview.backgroundColor = .clear
-        deepLinkPreview.textContainer.lineFragmentPadding = 0
-        deepLinkPreview.textContainerInset = .zero
-        deepLinkPreview.dataDetectorTypes = []
-        deepLinkPreview.font = UIFont.monospacedSystemFont(ofSize: 9, weight: .regular)
-        deepLinkPreview.textColor = Self.inkMuted.withAlphaComponent(0.50)
-        deepLinkPreview.textAlignment = .center
-        deepLinkPreview.translatesAutoresizingMaskIntoConstraints = false
 
         successStack.axis = .vertical
         successStack.alignment = .fill
@@ -498,23 +469,15 @@ final class ShareViewController: UIViewController {
         successStack.addArrangedSubview(successCheckmark)
         successStack.addArrangedSubview(successHeadline)
         successStack.addArrangedSubview(successDetail)
-        successStack.addArrangedSubview(goToListButton)
-        successStack.addArrangedSubview(backToRetailerButton)
-        successStack.addArrangedSubview(deepLinkPreview)
-        successStack.setCustomSpacing(4, after: successCheckmark)
-        successStack.setCustomSpacing(24, after: successDetail)
-        successStack.setCustomSpacing(8, after: goToListButton)
-        successStack.setCustomSpacing(12, after: backToRetailerButton)
+        successStack.setCustomSpacing(6, after: successCheckmark)
         successStack.translatesAutoresizingMaskIntoConstraints = false
         cardView.addSubview(successStack)
 
         NSLayoutConstraint.activate([
-            successStack.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 24),
+            successStack.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 32),
             successStack.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 24),
             successStack.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -24),
-            successStack.bottomAnchor.constraint(equalTo: cardView.safeAreaLayoutGuide.bottomAnchor, constant: -16),
-            goToListButton.heightAnchor.constraint(equalToConstant: 52),
-            backToRetailerButton.heightAnchor.constraint(equalToConstant: 44),
+            successStack.bottomAnchor.constraint(equalTo: cardView.safeAreaLayoutGuide.bottomAnchor, constant: -32),
         ])
     }
 
@@ -656,45 +619,19 @@ final class ShareViewController: UIViewController {
             inlineError.isHidden = true
 
         case .success:
-            titleLabel.text = "Saved!"
+            // Title is just the headline now; the "Saved!" word is in the
+            // body of the card via successHeadline so the title bar can
+            // stay focused on the card type.
+            titleLabel.text = "Save to Sortlist"
             if let name = savedCollectionName, !name.isEmpty {
-                // Include the sortlist id so the user can verify which
-                // record was hit — useful when investigating the
-                // shared-sortlist save mismatch.
-                if let cid = savedCollectionId {
-                    successDetail.text = "Added to \(name) · id \(cid)"
-                } else {
-                    successDetail.text = "Added to \(name)"
-                }
-                goToListButton.setTitle("Go to \(name)", for: .normal)
+                successDetail.text = "Added to \(name)"
             } else {
-                successDetail.text = "Added to Sortlist"
-                goToListButton.setTitle("Open Sortlist", for: .normal)
+                // AI returned low confidence and no name we can show — the
+                // product is saved but uncategorised. Keep the message
+                // honest rather than implying it landed somewhere it
+                // didn't.
+                successDetail.text = "Saved"
             }
-            // Disable the deep-link button if we don't actually have an ID
-            // (shouldn't happen in practice but be defensive).
-            goToListButton.isEnabled = (savedCollectionId != nil)
-            goToListButton.alpha = goToListButton.isEnabled ? 1.0 : 0.5
-            // Diagnostic block. Two lines:
-            //   1. The literal URL we'll hand to extensionContext.open
-            //      when Go-To is tapped. Useful for verifying the deep
-            //      link target is well-formed before the user taps.
-            //   2. The product / user / collection ids straight from the
-            //      products.add response. If userId != the saver's
-            //      account, OR if collectionId != the picked sortlist
-            //      id, that's the smoking gun for the shared-sortlist
-            //      save mismatch.
-            var diag = ""
-            if let cid = savedCollectionId {
-                let url = buildSortlistDeepLink(collectionId: cid).absoluteString
-                diag += "will open: \(url)\n"
-            }
-            let pid = savedProductId.map(String.init) ?? "?"
-            let puid = savedProductUserId.map(String.init) ?? "?"
-            let scid = savedCollectionId.map(String.init) ?? "?"
-            diag += "saved: product=\(pid) user=\(puid) collection=\(scid)"
-            deepLinkPreview.text = diag
-            deepLinkPreview.isHidden = false
 
         case .error(let message, let detail):
             titleLabel.text = "Something went wrong"
@@ -1301,9 +1238,20 @@ final class ShareViewController: UIViewController {
                 case .success(let outcome):
                     self.savedCollectionId = outcome.collectionId
                     self.savedCollectionName = outcome.collectionName ?? self.fallbackCollectionName()
-                    self.savedProductId = outcome.productId
-                    self.savedProductUserId = outcome.productUserId
                     self.state = .success
+                    // Auto-dismiss the share sheet 1 s after the success
+                    // card lands. The user gets a brief visual confirmation
+                    // (checkmark + "Added to <name>") and is then dropped
+                    // back where they were — usually Safari on the product
+                    // page. No buttons, no decisions, no friction.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                        guard let self = self, !self.didFinish else { return }
+                        self.didFinish = true
+                        self.extensionContext?.completeRequest(
+                            returningItems: [],
+                            completionHandler: nil
+                        )
+                    }
                 case .failure(let message):
                     self.state = .ready
                     self.inlineError.text = message
@@ -1331,155 +1279,6 @@ final class ShareViewController: UIViewController {
         if didFinish { return }
         didFinish = true
         extensionContext?.cancelRequest(withError: NSError(domain: "user.cancel", code: 0))
-    }
-
-    /// Builds the deep-link URL we hand to extensionContext.open.
-    ///
-    /// Universal Link, NOT the custom sortlist:// scheme. Reasoning:
-    /// Build 14's diagnostic showed extensionContext.open(sortlist://…)
-    /// returning false — share extensions live in a sandbox where iOS
-    /// is increasingly restrictive about which schemes you can open,
-    /// and the custom-scheme path has been unreliable for us across
-    /// iOS 17/26. Universal Links are the documented escape hatch:
-    ///
-    ///   - https://www.sortlist.shop/sortlist/<id> is a real route
-    ///     on the deployed web app (verified: HTTP 200).
-    ///   - The host app declares applinks:sortlist.shop +
-    ///     applinks:www.sortlist.shop in its associated-domains
-    ///     entitlement (visible in the signed entitlements blob).
-    ///   - When AASA on the server is configured to map this path to
-    ///     our app's bundle id, iOS routes the URL to the app, the
-    ///     deep-link handler picks it up, and the WebView lands on
-    ///     the sortlist page.
-    ///   - When AASA isn't configured (or doesn't match), iOS falls
-    ///     back to opening the URL in Safari — the user still lands
-    ///     on the right sortlist page, just on the web. Much better
-    ///     than the previous "open() returns false → error card"
-    ///     dead end.
-    private func buildSortlistDeepLink(collectionId: Int) -> URL {
-        let urlStr = "\(Self.baseURL)/sortlist/\(collectionId)"
-        return URL(string: urlStr)!
-    }
-
-    @objc private func onGoToList() {
-        guard let id = savedCollectionId else { return }
-        let universalLink = buildSortlistDeepLink(collectionId: id)
-        let schemeOnly = URL(string: "\(Self.appScheme)://")!
-
-        // The order matters. From Apple Forums thread 773342 (Apple
-        // Frameworks Engineer, 2024): NSExtensionContext.open() is
-        // Today-widget-only. Build 14 + Build 17 both proved this
-        // empirically — open() returned false for both the custom
-        // scheme AND a Universal Link with a confirmed-correct AASA.
-        //
-        // The responder-chain UIApplication.openURL: trick is the
-        // only mechanism that works for "share extension wants to
-        // open its host app" on iOS 17/26. expo-share-intent and
-        // Flutter's receive_sharing_intent both ship this in
-        // App Store binaries today. Apple DTS calls it a "Silly
-        // Runtime Hack" but does not call it private API.
-        //
-        // We try in priority order:
-        //   1. responder-chain openURL: with the Universal Link —
-        //      best case, the URL is delivered to the host app via
-        //      continueUserActivity / Linking and the WebView lands
-        //      on the right sortlist page.
-        //   2. responder-chain openURL: with the bare custom scheme
-        //      sortlist:// — lower-info, but lands the user in the
-        //      host app at minimum.
-        //   3. extensionContext.open() — kept as a documentation
-        //      fallback; will almost certainly fail same as before.
-        //
-        // We pre-set didFinish so the success-state UI doesn't react
-        // weirdly while the open is in flight; if all paths fail we
-        // clear it and transition to the error state with a full
-        // diagnostic listing every attempted URL and outcome.
-
-        didFinish = true
-
-        if openHostAppViaResponderChain(url: universalLink) {
-            extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
-            return
-        }
-        if openHostAppViaResponderChain(url: schemeOnly) {
-            extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
-            return
-        }
-
-        // Last resort. Almost certainly returns false on iOS 14+ for
-        // a Share Extension, but surfaces a definitive yes/no in the
-        // diagnostic if it ever does work.
-        extensionContext?.open(universalLink) { [weak self] success in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                if success {
-                    self.extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
-                } else {
-                    self.didFinish = false
-                    self.state = .error(
-                        message: "Couldn't open the Sortlist app.",
-                        detail: """
-                        All three open paths failed.
-
-                        1. responder-chain UIApplication.openURL: \
-                        with \(universalLink.absoluteString)
-                           — no UIResponder in the chain responded to openURL:
-                        2. responder-chain UIApplication.openURL: \
-                        with \(schemeOnly.absoluteString)
-                           — no UIResponder in the chain responded to openURL:
-                        3. extensionContext.open with \(universalLink.absoluteString)
-                           — returned false (Apple's documented Today-widget-only restriction).
-
-                        Long-press to copy.
-                        """
-                    )
-                }
-            }
-        }
-    }
-
-    /// Walks the SE's UIResponder chain looking for any responder that
-    /// responds to the `openURL:` selector, then `perform`s it with the
-    /// supplied URL. This is the responder-chain UIApplication.openURL:
-    /// trick that's the documented working pattern for "extension wants
-    /// to open its host app" since NSExtensionContext.open is
-    /// Today-widget-only (Apple Forums thread 773342, 2024).
-    ///
-    /// We start at `self.next` rather than `self` so we never call
-    /// a method we'd defined on ourselves. The selector is looked up
-    /// at runtime via `sel_registerName` rather than `#selector(...)`
-    /// to avoid needing an @objc stub on the class.
-    ///
-    /// Returns true if we found a responder and dispatched the call;
-    /// false if the chain had no openURL: target at all (which would
-    /// be very unusual — at minimum the UIApplication subclass for
-    /// app-extension hosts responds to it).
-    private func openHostAppViaResponderChain(url: URL) -> Bool {
-        let selector = sel_registerName("openURL:")
-        var responder: UIResponder? = self.next
-        while let r = responder {
-            if r.responds(to: selector) {
-                _ = r.perform(selector, with: url)
-                NSLog(
-                    "[SortlistShareExtension] responder-chain openURL: dispatched to %@ url=%@",
-                    String(describing: type(of: r)),
-                    url.absoluteString
-                )
-                return true
-            }
-            responder = r.next
-        }
-        NSLog(
-            "[SortlistShareExtension] responder-chain: NO openURL: target found for %@",
-            url.absoluteString
-        )
-        return false
-    }
-
-    @objc private func onBackToRetailer() {
-        // "Back to where you were" = dismiss the sheet. Safari is still
-        // underneath; iOS will reveal it.
-        dismissExtension()
     }
 
     private func dismissExtension() {
