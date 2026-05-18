@@ -191,7 +191,7 @@ final class ShareViewController: UIViewController {
             // The fallback path (.failure to resolve, timeout, custom-scheme
             // redirect target like amzn://, etc.) just reuses the original
             // URL so worst case we behave the same as before this change.
-            self.resolveFinalURL(from: rawUrl) { resolvedUrl in
+            self.resolveFinalURL(from: rawUrl) { [weak self] resolvedUrl in
                 DispatchQueue.main.async {
                     guard let self = self else { return }
                     self.sharedURL = resolvedUrl
