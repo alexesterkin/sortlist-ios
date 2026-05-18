@@ -191,9 +191,16 @@ final class ShareViewController: UIViewController {
             // The fallback path (.failure to resolve, timeout, custom-scheme
             // redirect target like amzn://, etc.) just reuses the original
             // URL so worst case we behave the same as before this change.
-            self.resolveFinalURL(from: rawUrl) { [weak self] resolvedUrl in
+            // Inner closure captures `self` strongly via inheritance from
+            // the guard-let-unwrapped scope above. That's intentional and
+            // safe for a Share Extension: the SE process is short-lived
+            // (iOS reaps it shortly after dismissal anyway), the HEAD
+            // request has a 4-second timeout, and a strong reference for
+            // those few seconds is fine. Re-doing `[weak self]` + the
+            // optional-unwrap dance inside the inner closures confused
+            // Swift's type checker — see the Build 20/21 compile error.
+            self.resolveFinalURL(from: rawUrl) { resolvedUrl in
                 DispatchQueue.main.async {
-                    guard let self = self else { return }
                     self.sharedURL = resolvedUrl
                     // We come out of extractSharedItem with the URL AND,
                     // when the user shared from Safari (the common path),
