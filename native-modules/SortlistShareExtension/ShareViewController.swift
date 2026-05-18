@@ -179,20 +179,105 @@ final class ShareViewController: UIViewController {
 
         state = .loading(message: "Reading shared link…")
         extractSharedItem { [weak self] in
-            guard let self = self, let url = self.sharedURL else { return }
-            // We come out of extractSharedItem with the URL AND, when the
-            // user shared from Safari (the common path), with scraped data
-            // populated by the JS preprocessor — title, image, price, etc.
-            // Render the preview card IMMEDIATELY using whatever the JS
-            // gave us. Server-side meta.fetch and collections.list run
-            // in the background to fill in any gaps and the picker menu.
-            self.rebuildPickerMenu()
-            self.state = .ready
-            if let imgUrl = self.scrapedProduct?.imageUrl, !imgUrl.isEmpty {
-                self.loadProductImage(from: imgUrl)
+            guard let self = self, let rawUrl = self.sharedURL else { return }
+            // Some retailers' in-page Share buttons hand iOS a wrapper /
+            // redirect URL (amzn.eu/d/…, share.amazon.com/…, a.co/d/…,
+            // bit.ly/…, t.co/…) instead of the actual product page. Run
+            // a HEAD request first to let URLSession follow HTTP 30x
+            // redirects to the final URL, then proceed with that. If the
+            // URL is already a direct product page no redirect happens
+            // and this just costs us one extra round-trip (~100-300 ms).
+            //
+            // The fallback path (.failure to resolve, timeout, custom-scheme
+            // redirect target like amzn://, etc.) just reuses the original
+            // URL so worst case we behave the same as before this change.
+            self.resolveFinalURL(from: rawUrl) { resolvedUrl in
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    self.sharedURL = resolvedUrl
+                    // We come out of extractSharedItem with the URL AND,
+                    // when the user shared from Safari (the common path),
+                    // with scraped data populated by the JS preprocessor —
+                    // title, image, price, etc. Render the preview card
+                    // IMMEDIATELY using whatever the JS gave us.
+                    // Server-side meta.fetch and collections.list run in
+                    // the background to fill in any gaps and the picker
+                    // menu.
+                    self.rebuildPickerMenu()
+                    self.state = .ready
+                    if let imgUrl = self.scrapedProduct?.imageUrl, !imgUrl.isEmpty {
+                        self.loadProductImage(from: imgUrl)
+                    }
+                    self.loadBackgroundData(url: resolvedUrl, jwt: token)
+                }
             }
-            self.loadBackgroundData(url: url, jwt: token)
         }
+    }
+
+    // MARK: - Redirect resolution
+
+    /// HEAD-and-follow-redirects to resolve wrapper URLs like
+    /// `amzn.eu/d/abc123`, `share.amazon.com/...`, `a.co/d/...`,
+    /// `bit.ly/...`, `t.co/...` to their final product-page URL before
+    /// we hand it to the scraper. URLSession follows HTTP 30x redirects
+    /// automatically (up to its internal cap of ~10), so we don't need a
+    /// custom delegate — `response?.url` is the final URL after the
+    /// chain settles.
+    ///
+    /// Falls back to the original URL on any error path:
+    ///   - network error / timeout (4 s)
+    ///   - server rejected HEAD (some retailers return 405 — we still
+    ///     get the final URL from URLSession's redirect log though)
+    ///   - non-http(s) final URL (e.g. chain ends at an app deep link
+    ///     like amzn://; URLSession stops at the last http URL in
+    ///     that case, but if there's no http URL at all we'd hit this)
+    ///   - sharedURL isn't a valid URL or isn't http(s) to begin with
+    ///
+    /// The completion is called exactly once, with whichever URL we end
+    /// up trusting. Bouncing back to main is the caller's job.
+    private func resolveFinalURL(from urlString: String, completion: @escaping (String) -> Void) {
+        guard let url = URL(string: urlString),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else {
+            completion(urlString)
+            return
+        }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 4.0
+        config.timeoutIntervalForResource = 5.0
+        let session = URLSession(configuration: config)
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "HEAD"
+        // Realistic browser UA — some retailers (Amazon especially)
+        // serve different redirect chains, or reject outright, when
+        // they detect a non-browser client.
+        request.setValue(
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+            forHTTPHeaderField: "User-Agent"
+        )
+
+        session.dataTask(with: request) { _, response, error in
+            // We don't gate on the response's status code — some servers
+            // 405 HEAD but still leave response.url pointing at the
+            // resolved URL after URLSession followed the 30x chain.
+            if let finalURL = response?.url,
+               let finalScheme = finalURL.scheme?.lowercased(),
+               (finalScheme == "https" || finalScheme == "http"),
+               !finalURL.absoluteString.isEmpty {
+                let resolved = finalURL.absoluteString
+                if resolved != urlString {
+                    NSLog("[SortlistShareExtension] resolved %@ → %@", urlString, resolved)
+                }
+                completion(resolved)
+                return
+            }
+            if let error = error {
+                NSLog("[SortlistShareExtension] redirect resolution failed for %@: %@", urlString, error.localizedDescription)
+            }
+            completion(urlString)
+        }.resume()
     }
 
     // MARK: - Layout
