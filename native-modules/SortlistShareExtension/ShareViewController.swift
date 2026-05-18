@@ -890,6 +890,26 @@ final class ShareViewController: UIViewController {
     }
 
     // MARK: - Share intake
+    //
+    // Many retailer apps (Zara, H&M, ASOS, Amazon, eBay, Vinted…) hand
+    // iOS share payloads with MULTIPLE NSItemProviders per NSExtensionItem,
+    // sometimes ALSO spread across multiple NSExtensionItems. A typical
+    // shape is { plain-text description } + { public.url product URL }.
+    //
+    // The old loop walked items one at a time and within each item picked
+    // the first provider with a known UTI, then returned. That failed
+    // whenever the FIRST provider was a description-text-with-no-URL: we
+    // hit the "no link in text" branch and never inspected the next
+    // provider (let alone the next item) which actually had the URL.
+    //
+    // The new flow:
+    //   1. Flatten ALL providers across ALL inputItems into one ordered list.
+    //   2. JS preprocessor (Safari → loaded page): one provider, gives
+    //      both URL and scraped OG metadata.
+    //   3. Any public.url provider, anywhere in the flattened list.
+    //   4. Any text provider (public.plain-text or public.text), regex-extract.
+    //      Try each one in turn — the first that yields a URL wins.
+    //   5. Error: nothing extractable.
 
     private func extractSharedItem(completion: @escaping () -> Void) {
         guard let extensionContext = extensionContext else {
@@ -897,51 +917,41 @@ final class ShareViewController: UIViewController {
             return
         }
 
+        var allAttachments: [NSItemProvider] = []
         for item in extensionContext.inputItems {
-            guard let extensionItem = item as? NSExtensionItem,
-                  let attachments = extensionItem.attachments else { continue }
-
-            // STEP 1: Look for a property-list attachment — that's the
-            // result of our JS preprocessor running in the page context.
-            // When the user shares from Safari this attachment is always
-            // present (Info.plist declares NSExtensionJavaScriptPreprocessingFile)
-            // and gives us window.location.href + locally-scraped OG/JSON-LD
-            // metadata. This path is preferred because:
-            //   (a) the URL is the actual page URL the user is on, not
-            //       the <link rel="canonical"> Safari otherwise passes
-            //       via UTType.url (fixes the "saved the category page,
-            //       not the product page" bug);
-            //   (b) the scraped data is instant — no server round-trip
-            //       needed to render the preview.
-            for provider in attachments {
-                if provider.hasItemConformingToTypeIdentifier(UTType.propertyList.identifier) {
-                    provider.loadItem(forTypeIdentifier: UTType.propertyList.identifier, options: nil) { [weak self] data, _ in
-                        DispatchQueue.main.async {
-                            guard let self = self else { return }
-                            // JS preprocessor results arrive wrapped:
-                            //   { NSExtensionJavaScriptPreprocessingResultsKey: { url, title, image, ... } }
-                            if let outer = data as? [String: Any],
-                               let inner = outer[NSExtensionJavaScriptPreprocessingResultsKey] as? [String: Any],
-                               let urlString = (inner["url"] as? String).nonEmpty {
-                                self.consumeJSPreprocessorResult(inner, fallbackUrl: urlString)
-                                completion()
-                                return
-                            }
-                            // Property list present but no usable URL —
-                            // fall through to URL/text providers.
-                            self.fallbackUrlExtraction(attachments: attachments, completion: completion)
-                        }
-                    }
-                    return
-                }
+            guard let ei = item as? NSExtensionItem else { continue }
+            if let atts = ei.attachments {
+                allAttachments.append(contentsOf: atts)
             }
-
-            // STEP 2: No JS preprocessor attachment (user shared from a
-            // non-Safari surface, e.g. Notes / Messages / "Copy Link").
-            fallbackUrlExtraction(attachments: attachments, completion: completion)
+        }
+        if allAttachments.isEmpty {
+            state = .error(message: "Nothing shareable found.", detail: nil)
             return
         }
-        state = .error(message: "Nothing shareable found.", detail: nil)
+
+        // STEP 1: JS preprocessor result, if present anywhere.
+        if let jsProvider = allAttachments.first(where: {
+            $0.hasItemConformingToTypeIdentifier(UTType.propertyList.identifier)
+        }) {
+            jsProvider.loadItem(forTypeIdentifier: UTType.propertyList.identifier, options: nil) { [weak self] data, _ in
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    if let outer = data as? [String: Any],
+                       let inner = outer[NSExtensionJavaScriptPreprocessingResultsKey] as? [String: Any],
+                       let urlString = (inner["url"] as? String).nonEmpty {
+                        self.consumeJSPreprocessorResult(inner, fallbackUrl: urlString)
+                        completion()
+                        return
+                    }
+                    // Property list present but unusable — fall through.
+                    self.extractFromUrlOrText(all: allAttachments, completion: completion)
+                }
+            }
+            return
+        }
+
+        // STEP 2+: try URL providers, then text providers.
+        extractFromUrlOrText(all: allAttachments, completion: completion)
     }
 
     /// Stash the JS preprocessor's output as sharedURL + scrapedProduct.
@@ -958,51 +968,86 @@ final class ShareViewController: UIViewController {
         )
     }
 
-    /// Used when no JS preprocessor result is available (e.g. user shared
-    /// a URL from outside Safari). Walks the attachments looking for a
-    /// public.url or public.plain-text item and pulls the URL out of it.
-    private func fallbackUrlExtraction(
-        attachments: [NSItemProvider],
+    /// Walks the (already-flattened) attachment list looking for any
+    /// public.url provider first, then any text provider with an embedded
+    /// URL. The "url first across the entire payload" rule is what fixes
+    /// the Zara/multi-item bug — retailers commonly attach a plain-text
+    /// description AND a separate public.url provider, and we need to
+    /// reach the URL regardless of which one comes first in the array.
+    private func extractFromUrlOrText(
+        all: [NSItemProvider],
         completion: @escaping () -> Void
     ) {
-        let setAndContinue: (String) -> Void = { [weak self] urlString in
-            guard let self = self else { return }
-            self.sharedURL = urlString
-            completion()
+        if let urlProvider = all.first(where: {
+            $0.hasItemConformingToTypeIdentifier(UTType.url.identifier)
+        }) {
+            urlProvider.loadItem(forTypeIdentifier: UTType.url.identifier, options: nil) { [weak self] data, _ in
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    if let url = data as? URL {
+                        self.sharedURL = url.absoluteString
+                        completion()
+                        return
+                    }
+                    if let str = data as? String, let parsed = URL(string: str) {
+                        self.sharedURL = parsed.absoluteString
+                        completion()
+                        return
+                    }
+                    // URL provider loaded but couldn't be parsed — fall
+                    // back to scanning text providers for an embedded URL.
+                    self.extractFromText(all: all, completion: completion)
+                }
+            }
+            return
         }
+        extractFromText(all: all, completion: completion)
+    }
 
-        for provider in attachments {
-            if provider.hasItemConformingToTypeIdentifier(UTType.url.identifier) {
-                provider.loadItem(forTypeIdentifier: UTType.url.identifier, options: nil) { [weak self] data, _ in
-                    DispatchQueue.main.async {
-                        guard let self = self else { return }
-                        if let url = data as? URL {
-                            setAndContinue(url.absoluteString)
-                        } else if let str = data as? String, let parsed = URL(string: str) {
-                            setAndContinue(parsed.absoluteString)
-                        } else {
-                            self.state = .error(message: "Couldn't read shared URL.", detail: nil)
-                        }
-                    }
-                }
-                return
+    /// Last-resort: scan every text provider (public.plain-text AND the
+    /// more general public.text) for an embedded URL via regex. Tries
+    /// them in payload order; first match wins.
+    private func extractFromText(
+        all: [NSItemProvider],
+        completion: @escaping () -> Void
+    ) {
+        let textIds = [UTType.plainText.identifier, UTType.text.identifier]
+        let textProviders: [(NSItemProvider, String)] = all.compactMap { provider in
+            for tid in textIds where provider.hasItemConformingToTypeIdentifier(tid) {
+                return (provider, tid)
             }
-            if provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier) {
-                provider.loadItem(forTypeIdentifier: UTType.plainText.identifier, options: nil) { [weak self] data, _ in
-                    DispatchQueue.main.async {
-                        guard let self = self else { return }
-                        if let text = data as? String,
-                           let range = text.range(of: #"https?://\S+"#, options: .regularExpression) {
-                            setAndContinue(String(text[range]))
-                        } else {
-                            self.state = .error(message: "No link found in shared text.", detail: nil)
-                        }
-                    }
+            return nil
+        }
+        if textProviders.isEmpty {
+            state = .error(message: "Nothing shareable found.", detail: nil)
+            return
+        }
+        tryNextTextProvider(textProviders, index: 0, completion: completion)
+    }
+
+    private func tryNextTextProvider(
+        _ providers: [(NSItemProvider, String)],
+        index: Int,
+        completion: @escaping () -> Void
+    ) {
+        if index >= providers.count {
+            state = .error(message: "No link found in shared text.", detail: nil)
+            return
+        }
+        let (provider, typeId) = providers[index]
+        provider.loadItem(forTypeIdentifier: typeId, options: nil) { [weak self] data, _ in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                if let text = data as? String,
+                   let range = text.range(of: #"https?://\S+"#, options: .regularExpression) {
+                    self.sharedURL = String(text[range])
+                    completion()
+                    return
                 }
-                return
+                // Nothing in this one — try the next.
+                self.tryNextTextProvider(providers, index: index + 1, completion: completion)
             }
         }
-        state = .error(message: "Nothing shareable found.", detail: nil)
     }
 
     // MARK: - Background data load
