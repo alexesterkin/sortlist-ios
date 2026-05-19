@@ -31,6 +31,7 @@
 import UIKit
 import Security
 import UniformTypeIdentifiers
+import WebKit
 
 final class ShareViewController: UIViewController {
 
@@ -101,6 +102,11 @@ final class ShareViewController: UIViewController {
     // Outcome after save (used by the success screen).
     private var savedCollectionId: Int?
     private var savedCollectionName: String?
+
+    // Strong reference holder for the active on-device WKWebView scraper.
+    // Set when we kick off OnDeviceScraper.scrape() and cleared in the
+    // completion handler — keeps the scraper alive across the async load.
+    private var onDeviceScraper: OnDeviceScraper?
 
     // MARK: - Subviews
 
@@ -1083,36 +1089,120 @@ final class ShareViewController: UIViewController {
         let jsCovered = scrapedProduct?.title != nil
             && scrapedProduct?.imageUrl != nil
         if jsCovered {
-            // JS preprocessor already produced title + image. Save the
-            // ~3-15s Playwright/LLM round-trip and skip the server scrape.
+            // JS preprocessor (Safari share) already produced title +
+            // image. Skip both the on-device WKWebView path AND the
+            // server meta.fetch — we already have the best signal.
             return
         }
 
-        fetchScrapedProduct(url: url, jwt: jwt) { [weak self] result in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                switch result {
-                case .success(let server):
-                    // Merge: prefer the JS preprocessor values where
-                    // present, fill in nils from the server result.
-                    let merged = ScrapedProduct(
-                        title:    self.scrapedProduct?.title    ?? server.title,
-                        imageUrl: self.scrapedProduct?.imageUrl ?? server.imageUrl,
-                        price:    self.scrapedProduct?.price    ?? server.price,
-                        currency: self.scrapedProduct?.currency ?? server.currency,
-                        siteName: self.scrapedProduct?.siteName ?? server.siteName
-                    )
-                    self.scrapedProduct = merged
-                    self.renderProductCard()
-                    if self.productImageView.image == nil,
-                       let imgUrl = merged.imageUrl, !imgUrl.isEmpty {
-                        self.loadProductImage(from: imgUrl)
+        // Three-tier fallback chain for shares that didn't come from Safari
+        // (e.g. the Zara Home iOS app shares us a URL with no preprocessor
+        // result):
+        //   1. OnDeviceScraper — load the URL in a hidden WKWebView from
+        //      the user's actual iPhone IP. Most reliable: real Safari
+        //      fingerprint + residential IP defeats the bot blockers that
+        //      reject our datacenter IP at the server.
+        //   2. Server meta.fetch — fallback when on-device scrape times
+        //      out or returns no usable data (cold device, page requires
+        //      login, etc.).
+        //   3. Save with URL only if even that fails (handled at save time).
+        runOnDeviceScrape(urlString: url) { [weak self] scraped in
+            guard let self = self else { return }
+            if let scraped = scraped {
+                self.mergeScrapedData(scraped)
+                self.renderProductCard()
+                if self.productImageView.image == nil,
+                   let imgUrl = self.scrapedProduct?.imageUrl, !imgUrl.isEmpty {
+                    self.loadProductImage(from: imgUrl)
+                }
+                // If the on-device path gave us both title AND image,
+                // skip the server round-trip — we have enough.
+                if self.scrapedProduct?.title != nil
+                    && self.scrapedProduct?.imageUrl != nil {
+                    return
+                }
+            }
+            // On-device scrape failed or returned partial data.
+            // Fall back to server meta.fetch to fill in any gaps.
+            self.fetchScrapedProduct(url: url, jwt: jwt) { [weak self] result in
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    switch result {
+                    case .success(let server):
+                        self.mergeScrapedData(server)
+                        self.renderProductCard()
+                        if self.productImageView.image == nil,
+                           let imgUrl = self.scrapedProduct?.imageUrl,
+                           !imgUrl.isEmpty {
+                            self.loadProductImage(from: imgUrl)
+                        }
+                    case .failure(let msg):
+                        NSLog("[SortlistShareExtension] meta.fetch failed: %@", msg)
                     }
-                case .failure(let msg):
-                    NSLog("[SortlistShareExtension] meta.fetch failed: %@", msg)
                 }
             }
         }
+    }
+
+    /// Merge an incoming ScrapedProduct into self.scrapedProduct, preferring
+    /// existing values and filling in nils from the new one. Used by both
+    /// the on-device WKWebView path and the server meta.fetch fallback.
+    private func mergeScrapedData(_ incoming: ScrapedProduct) {
+        scrapedProduct = ScrapedProduct(
+            title:    scrapedProduct?.title    ?? incoming.title,
+            imageUrl: scrapedProduct?.imageUrl ?? incoming.imageUrl,
+            price:    scrapedProduct?.price    ?? incoming.price,
+            currency: scrapedProduct?.currency ?? incoming.currency,
+            siteName: scrapedProduct?.siteName ?? incoming.siteName,
+        )
+    }
+
+    /// Kick off an on-device WKWebView scrape. Resolves with a ScrapedProduct
+    /// (possibly all-nil if the page couldn't be parsed) or nil if the
+    /// scraper itself failed to launch / timed out / page errored. The
+    /// completion runs on the main queue.
+    private func runOnDeviceScrape(
+        urlString: String,
+        completion: @escaping (ScrapedProduct?) -> Void,
+    ) {
+        guard let url = URL(string: urlString) else {
+            completion(nil)
+            return
+        }
+        let scraper = OnDeviceScraper()
+        onDeviceScraper = scraper
+        let startedAt = Date()
+        scraper.scrape(url: url, host: view) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.onDeviceScraper = nil
+                let elapsedMs = Int(Date().timeIntervalSince(startedAt) * 1000)
+                switch result {
+                case .success(let dict):
+                    NSLog(
+                        "[OnDeviceScrape] success in %dms: title=%@ image=%@ price=%@",
+                        elapsedMs,
+                        (dict["title"] as? String) ?? "<nil>",
+                        (dict["image"] as? String) ?? "<nil>",
+                        (dict["price"] as? String) ?? "<nil>",
+                    )
+                    completion(self.scrapedProductFromOnDeviceDict(dict))
+                case .failure(let err):
+                    NSLog("[OnDeviceScrape] failed in %dms: %@", elapsedMs, String(describing: err))
+                    completion(nil)
+                }
+            }
+        }
+    }
+
+    private func scrapedProductFromOnDeviceDict(_ dict: [String: Any]) -> ScrapedProduct {
+        return ScrapedProduct(
+            title:    (dict["title"] as? String).nonEmpty,
+            imageUrl: (dict["image"] as? String).nonEmpty,
+            price:    (dict["price"] as? String).nonEmpty,
+            currency: (dict["currency"] as? String).nonEmpty,
+            siteName: (dict["siteName"] as? String).nonEmpty
+        )
     }
 
     // MARK: - Networking
@@ -1488,3 +1578,255 @@ private extension Optional where Wrapped == String {
 // @retroactive suppresses the Swift 5.9+ "you don't own this type" warning
 // that would otherwise show up on every build.
 extension String: @retroactive Error {}
+
+// MARK: - OnDeviceScraper
+//
+// Loads a product URL in a hidden WKWebView inside the Share Extension's
+// own process, waits a moment for client-side hydration, then runs our
+// existing ShareExtensionPreprocessor.js (the same script Safari executes
+// during a page-share preprocessing call) to extract OG / JSON-LD /
+// retailer-specific metadata.
+//
+// Why this works where server-side scraping doesn't:
+//   - Comes from the user's actual iPhone IP (residential / cellular),
+//     not a Railway datacenter IP. Retailers with reputation-based bot
+//     defences (Zara Home is the canonical example — returns 403
+//     "Access Denied" to every datacenter IP including Playwright
+//     running on our server) accept it as a normal page view.
+//   - Uses WebKit's real Safari fingerprint, not a headless-browser
+//     signature.
+//   - Carries no automation-driver markers (no `navigator.webdriver`).
+//
+// Memory:
+//   WKWebView's content rendering happens in a separate Web Content
+//   Process spawned by the OS — those pages don't count toward this
+//   Share Extension's 120 MB cap. We still tear the view down as soon
+//   as the scrape finishes.
+//
+// Content blockers reduce page weight by skipping ad networks, tracker
+// pixels, and webfonts — keeps the SE process's footprint low and speeds
+// up the time-to-hydration for tough JS-heavy retailer pages.
+
+final class OnDeviceScraper: NSObject {
+
+    enum ScrapeError: Error, CustomStringConvertible {
+        case timeout
+        case navigationFailed(String)
+        case scriptFailed(String)
+        case noUsableResult
+        var description: String {
+            switch self {
+            case .timeout:                return "timeout"
+            case .navigationFailed(let m): return "navigation failed: \(m)"
+            case .scriptFailed(let m):    return "script failed: \(m)"
+            case .noUsableResult:         return "no usable result"
+            }
+        }
+    }
+
+    /// Maximum wall time for the entire scrape attempt (load + hydration
+    /// wait + evaluateJavaScript). Tuned conservatively so we don't keep
+    /// the user staring at the SE's loading spinner.
+    private static let pageLoadTimeoutSec: TimeInterval = 8.0
+
+    /// How long to wait after `didFinish navigation` before invoking the
+    /// preprocessor. Most retailer pages inject JSON-LD / OG into <head>
+    /// during hydration, which completes within a second of DOM ready;
+    /// 1.5s leaves a little slack without dragging the share UX.
+    private static let hydrationWaitSec: TimeInterval = 1.5
+
+    private var webView: WKWebView?
+    private var completion: ((Result<[String: Any], ScrapeError>) -> Void)?
+    private var timeoutWorkItem: DispatchWorkItem?
+    private var isFinished = false
+
+    // Compiled once, cached at the type level so subsequent scrapes don't
+    // re-pay the compile cost (~50-100 ms).
+    private static var cachedRuleList: WKContentRuleList?
+
+    func scrape(
+        url: URL,
+        host: UIView,
+        completion: @escaping (Result<[String: Any], ScrapeError>) -> Void,
+    ) {
+        self.completion = completion
+
+        let config = WKWebViewConfiguration()
+        config.userContentController.removeAllUserScripts()
+
+        // Inject the same JS preprocessor Safari uses. The script declares
+        // the `ShareExtensionPreprocessor` class and stores an instance
+        // in window.ExtensionPreprocessingJS. We call its scrape() method
+        // after the page hydrates.
+        if let scriptUrl = Bundle.main.url(
+            forResource: "ShareExtensionPreprocessor",
+            withExtension: "js",
+        ),
+           let scriptContent = try? String(contentsOf: scriptUrl) {
+            let userScript = WKUserScript(
+                source: scriptContent,
+                injectionTime: .atDocumentEnd,
+                forMainFrameOnly: true,
+            )
+            config.userContentController.addUserScript(userScript)
+        } else {
+            NSLog("[OnDeviceScraper] could not read ShareExtensionPreprocessor.js from bundle")
+        }
+
+        Self.compileBlockList { [weak self] ruleList in
+            guard let self = self else { return }
+            DispatchQueue.main.async {
+                if let ruleList = ruleList {
+                    config.userContentController.add(ruleList)
+                }
+                self.startLoad(url: url, config: config, host: host)
+            }
+        }
+    }
+
+    private func startLoad(url: URL, config: WKWebViewConfiguration, host: UIView) {
+        let wv = WKWebView(frame: CGRect(x: 0, y: 0, width: 1, height: 1), configuration: config)
+        wv.navigationDelegate = self
+        // Off-screen but mounted in the view hierarchy. WKWebView won't
+        // run JS reliably if it's purely detached.
+        wv.alpha = 0
+        wv.isUserInteractionEnabled = false
+        host.addSubview(wv)
+        webView = wv
+
+        // Hard wall clock — give up if the page can't be loaded + scraped
+        // within budget.
+        let work = DispatchWorkItem { [weak self] in
+            self?.finish(.failure(.timeout))
+        }
+        timeoutWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.pageLoadTimeoutSec, execute: work)
+
+        NSLog("[OnDeviceScraper] loading %@", url.absoluteString)
+        wv.load(URLRequest(
+            url: url,
+            cachePolicy: .reloadIgnoringLocalCacheData,
+            timeoutInterval: Self.pageLoadTimeoutSec,
+        ))
+    }
+
+    private func runScrape() {
+        // ExtensionPreprocessingJS is a global set by the injected user
+        // script (`var ExtensionPreprocessingJS = new ShareExtensionPreprocessor();`).
+        // Calling .scrape() returns a plain JS object; we stringify it on
+        // the JS side so Swift gets a deterministic JSON value back.
+        let kickoff = "JSON.stringify(ExtensionPreprocessingJS.scrape());"
+        webView?.evaluateJavaScript(kickoff) { [weak self] result, error in
+            guard let self = self else { return }
+            if let error = error {
+                self.finish(.failure(.scriptFailed(error.localizedDescription)))
+                return
+            }
+            guard let jsonString = result as? String,
+                  let data = jsonString.data(using: .utf8),
+                  let dict = (try? JSONSerialization.jsonObject(with: data))
+                    as? [String: Any] else {
+                self.finish(.failure(.noUsableResult))
+                return
+            }
+            self.finish(.success(dict))
+        }
+    }
+
+    private func finish(_ result: Result<[String: Any], ScrapeError>) {
+        guard !isFinished else { return }
+        isFinished = true
+        timeoutWorkItem?.cancel()
+        timeoutWorkItem = nil
+        webView?.stopLoading()
+        webView?.removeFromSuperview()
+        webView?.navigationDelegate = nil
+        webView = nil
+        let c = completion
+        completion = nil
+        c?(result)
+    }
+
+    /// Minimal block list — kills the heaviest ad/tracker domains and
+    /// most webfonts. Goal is to shave hydration time for tough retailer
+    /// pages, not to be a full ad-blocker.
+    private static func compileBlockList(completion: @escaping (WKContentRuleList?) -> Void) {
+        if let cached = cachedRuleList {
+            completion(cached)
+            return
+        }
+        let blockListJSON = """
+        [
+          {"trigger":{"url-filter":"doubleclick\\\\.net"},"action":{"type":"block"}},
+          {"trigger":{"url-filter":"google-analytics\\\\.com"},"action":{"type":"block"}},
+          {"trigger":{"url-filter":"googletagmanager\\\\.com"},"action":{"type":"block"}},
+          {"trigger":{"url-filter":"googletagservices\\\\.com"},"action":{"type":"block"}},
+          {"trigger":{"url-filter":"google-syndication\\\\.com"},"action":{"type":"block"}},
+          {"trigger":{"url-filter":"facebook\\\\.com/tr"},"action":{"type":"block"}},
+          {"trigger":{"url-filter":"facebook\\\\.net"},"action":{"type":"block"}},
+          {"trigger":{"url-filter":"hotjar\\\\.com"},"action":{"type":"block"}},
+          {"trigger":{"url-filter":"segment\\\\.com"},"action":{"type":"block"}},
+          {"trigger":{"url-filter":"criteo\\\\."},"action":{"type":"block"}},
+          {"trigger":{"url-filter":"\\\\.ttf$"},"action":{"type":"block"}},
+          {"trigger":{"url-filter":"\\\\.otf$"},"action":{"type":"block"}},
+          {"trigger":{"url-filter":"\\\\.woff$"},"action":{"type":"block"}},
+          {"trigger":{"url-filter":"\\\\.woff2$"},"action":{"type":"block"}},
+          {"trigger":{"url-filter":"\\\\.mp4$"},"action":{"type":"block"}},
+          {"trigger":{"url-filter":"\\\\.webm$"},"action":{"type":"block"}}
+        ]
+        """
+        WKContentRuleListStore.default()?.compileContentRuleList(
+            forIdentifier: "SortlistShareScraperBlocks",
+            encodedContentRuleList: blockListJSON,
+        ) { ruleList, error in
+            if let error = error {
+                NSLog("[OnDeviceScraper] block list compile failed: %@", error.localizedDescription)
+            }
+            cachedRuleList = ruleList
+            completion(ruleList)
+        }
+    }
+}
+
+extension OnDeviceScraper: WKNavigationDelegate {
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        // DOM is ready. Give client-side hydration a beat to inject the
+        // JSON-LD / OG metadata, then run the preprocessor.
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.hydrationWaitSec) { [weak self] in
+            self?.runScrape()
+        }
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        didFail navigation: WKNavigation!,
+        withError error: Error,
+    ) {
+        finish(.failure(.navigationFailed(error.localizedDescription)))
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        didFailProvisionalNavigation navigation: WKNavigation!,
+        withError error: Error,
+    ) {
+        finish(.failure(.navigationFailed(error.localizedDescription)))
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationAction: WKNavigationAction,
+        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void,
+    ) {
+        // Block custom-scheme redirects (zara://, fb://, twitter://, …).
+        // Retailers' app banners sometimes try to push us into their
+        // native app, which would just fail and abort the scrape.
+        if let url = navigationAction.request.url,
+           let scheme = url.scheme,
+           scheme != "http" && scheme != "https" {
+            decisionHandler(.cancel)
+            return
+        }
+        decisionHandler(.allow)
+    }
+}
