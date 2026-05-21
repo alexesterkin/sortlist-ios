@@ -111,7 +111,7 @@ export default function LoginScreen() {
               Sortlist
             </Text>
             <Text variant="caption" style={styles.tagline}>
-              Save & organise your shopping finds.
+              Save & organize your shopping finds.
             </Text>
           </View>
 
