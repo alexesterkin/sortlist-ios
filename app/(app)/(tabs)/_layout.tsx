@@ -3,8 +3,17 @@ import { Tabs } from 'expo-router';
 import { Platform, StyleSheet } from 'react-native';
 
 import { Brand, Fonts } from '@/constants/theme';
+import { API_BASE_URL } from '@/lib/config';
+import { setPendingWebViewUrl } from '@/lib/webview-bridge';
 
 const TAB_BAR_HEIGHT = Platform.OS === 'ios' ? 84 : 64;
+
+// Tapping the Sortlist tab icon always jumps the WebView to the
+// "all sortlists" view — both when switching tabs and when re-tapping
+// while already on the Sortlist tab. setPendingWebViewUrl invokes the
+// registered navigator immediately if the WebView is mounted, otherwise
+// queues for the WebView's next mount to consume as its initial URL.
+const SORTLISTS_URL = `${API_BASE_URL}/sortlists`;
 
 export default function TabsLayout() {
   return (
@@ -37,6 +46,11 @@ export default function TabsLayout() {
               color={color}
             />
           ),
+        }}
+        listeners={{
+          tabPress: () => {
+            setPendingWebViewUrl(SORTLISTS_URL);
+          },
         }}
       />
       <Tabs.Screen
