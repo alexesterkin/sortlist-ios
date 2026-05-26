@@ -90,8 +90,23 @@ export default function WebTabScreen() {
   }, []);
 
   const injectedJavaScriptBeforeContentLoaded = useMemo(() => {
+    // window.__SORTLIST_IOS_APP__ is a signal to the web app that it's
+    // running inside our native WebView, not in a real browser. The web
+    // app uses it to suppress UI that doesn't make sense in-app — e.g.
+    // the "Install the Chrome extension" onboarding modal. Set
+    // unconditionally (even when there's no auth token) because the
+    // suppression should hold for every WebView load.
+    //
+    // The web app ALSO has a UA-based fallback that detects stock
+    // WKWebView (the iOS WebView strips the Safari/ token from its UA,
+    // which distinguishes it from Mobile Safari and from iOS Chrome /
+    // Firefox / Edge). So even iOS builds shipped before this flag
+    // existed are protected. This flag is the robust long-term signal.
     if (!token) {
-      return `true;`;
+      return `(function () {
+        try { window.__SORTLIST_IOS_APP__ = true; } catch (e) {}
+      })();
+      true;`;
     }
     // 1-year max-age so the cookie survives across cold starts; the page
     // is the same origin so document.cookie writes apply to sortlist.shop.
@@ -99,6 +114,7 @@ export default function WebTabScreen() {
     const oneYearSec = 60 * 60 * 24 * 365;
     return `(function () {
       try {
+        window.__SORTLIST_IOS_APP__ = true;
         document.cookie =
           '${SESSION_COOKIE_NAME}=${token}' +
           '; path=/; domain=.sortlist.shop' +
