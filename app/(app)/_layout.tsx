@@ -1,11 +1,12 @@
 import { Redirect, Stack } from 'expo-router';
 import { ActivityIndicator, View } from 'react-native';
 
+import { Onboarding } from '@/components/onboarding';
 import { Brand } from '@/constants/theme';
 import { useAuth } from '@/lib/auth';
 
 export default function AppLayout() {
-  const { isAuthed, isLoading } = useAuth();
+  const { isAuthed, isLoading, user, markOnboardingSeen } = useAuth();
 
   if (isLoading) {
     return (
@@ -23,6 +24,19 @@ export default function AppLayout() {
 
   if (!isAuthed) {
     return <Redirect href={'/(auth)/login' as never} />;
+  }
+
+  // First-login onboarding tutorial. Rendered in place of the main tabs
+  // until the user dismisses it (Skip or Get started) — at which point
+  // markOnboardingSeen flips the server-side flag, refetches auth.me, and
+  // AppLayout re-renders with the Stack below.
+  //
+  // Explicit `=== false` (not `!user.hasSeenOnboarding`) so undefined
+  // (older server without the column) is treated as already-seen rather
+  // than trapping users in a tutorial whose markSeen endpoint doesn't
+  // exist yet.
+  if (user && user.hasSeenOnboarding === false) {
+    return <Onboarding onDone={markOnboardingSeen} />;
   }
 
   // Outer Stack just hosts the (tabs) group now. The (tabs) group itself

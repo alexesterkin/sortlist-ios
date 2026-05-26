@@ -66,8 +66,13 @@ export default function WebTabScreen() {
   // `sortlist://navigate?url=…` deep link. Consumed once on mount; the
   // bridge clears itself. Hot-path navigation is wired in a useEffect
   // below so the WebView can jump while it's already mounted.
+  //
+  // Falls back to /sortlists (the user's collections grid) rather than
+  // the root, because the root URL renders the marketing landing page
+  // ("Close the tabs. Keep the products.") which is pointless once
+  // you're signed in inside the iOS app.
   const initialSourceUrl = useMemo(
-    () => consumePendingWebViewUrl() ?? API_BASE_URL,
+    () => consumePendingWebViewUrl() ?? `${API_BASE_URL}/sortlists`,
     [],
   );
 

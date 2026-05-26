@@ -32,6 +32,7 @@ type AuthState = {
   signInWithApple: () => Promise<void>;
   signOut: () => Promise<void>;
   deleteAccount: () => Promise<void>;
+  markOnboardingSeen: () => Promise<void>;
   refresh: () => Promise<void>;
 };
 
@@ -64,6 +65,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const logoutMutation = trpc.auth.logout.useMutation();
   const appleMutation = trpc.auth.signInWithApple.useMutation();
   const deleteAccountMutation = trpc.auth.deleteAccount.useMutation();
+  const markOnboardingSeenMutation = trpc.auth.markOnboardingSeen.useMutation();
 
   useEffect(() => {
     log('hydrating: loading session token from AsyncStorage');
@@ -300,6 +302,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     await me.refetch();
   }, [deleteAccountMutation, me]);
 
+  // Called by the Onboarding component on Skip or Get started. Flips the
+  // server-side flag, then refetches auth.me so AppLayout's gate re-renders
+  // and replaces the onboarding screen with the main app.
+  const markOnboardingSeen = useCallback(async () => {
+    log('markOnboardingSeen: calling auth.markOnboardingSeen');
+    try {
+      await markOnboardingSeenMutation.mutateAsync();
+    } catch (e) {
+      warn('markOnboardingSeen failed:', describeError(e));
+      // Don't throw — onboarding shouldn't trap the user. AppLayout's
+      // re-render still happens via the auth.me refetch and the user
+      // will at worst see onboarding again next launch.
+    }
+    await me.refetch();
+  }, [markOnboardingSeenMutation, me]);
+
   const refresh = useCallback(async () => {
     await me.refetch();
   }, [me]);
@@ -317,6 +335,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       signInWithApple,
       signOut,
       deleteAccount,
+      markOnboardingSeen,
       refresh,
     }),
     [
@@ -329,6 +348,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       signInWithApple,
       signOut,
       deleteAccount,
+      markOnboardingSeen,
       refresh,
     ],
   );

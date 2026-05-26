@@ -9,6 +9,13 @@ export type User = {
   email: string;
   loginMethod?: string;
   role?: string;
+  // First-login onboarding tutorial dismissal flag. Stored on the server
+  // (users.hasSeenOnboarding) so it persists across reinstalls and works
+  // across multiple devices on the same account. Optional in the type
+  // because pre-migration clients may see it as undefined; the AuthGate
+  // treats undefined as "already seen" (no tutorial) to avoid showing
+  // onboarding to users on an older server.
+  hasSeenOnboarding?: boolean;
   createdAt?: Date | string;
   updatedAt?: Date | string;
   lastSignedIn?: Date | string | null;
