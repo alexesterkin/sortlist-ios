@@ -11,6 +11,7 @@
       "supportsTablet": false,
       "bundleIdentifier": "com.alexesterkin.sortlist",
       "appleTeamId": "REPLACE_WITH_APPLE_TEAM_ID",
+      "usesAppleSignIn": true,
       "associatedDomains": [
         "applinks:sortlist.shop",
         "applinks:www.sortlist.shop"
@@ -42,6 +43,7 @@
       "expo-router",
       "expo-secure-store",
       "expo-web-browser",
+      "expo-apple-authentication",
       [
         "expo-splash-screen",
         {

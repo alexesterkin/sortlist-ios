@@ -17,8 +17,9 @@ import { useAuth } from '@/lib/auth';
 
 export default function SettingsScreen() {
   const insets = useSafeAreaInsets();
-  const { user, signOut } = useAuth();
+  const { user, signOut, deleteAccount } = useAuth();
   const [signingOut, setSigningOut] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   const version = Constants.expoConfig?.version ?? '1.0.0';
 
@@ -38,6 +39,57 @@ export default function SettingsScreen() {
         },
       },
     ]);
+  };
+
+  // Apple App Store Guideline 5.1.1(v): users who can create an account must
+  // be able to fully delete it from inside the app. Two-step destructive
+  // confirmation so a single misfire can't wipe everything. The actual
+  // server call lives in lib/auth.tsx → deleteAccount.
+  const confirmDeleteAccount = () => {
+    Alert.alert(
+      'Delete account?',
+      'This permanently deletes your Sortlist account along with every ' +
+        'Sortlist, saved product, tag, and shared collection link you own. ' +
+        'This cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Continue',
+          style: 'destructive',
+          onPress: () => {
+            // Second confirm — final point of no return.
+            Alert.alert(
+              'Are you sure?',
+              'Tap "Delete forever" to permanently erase your account ' +
+                'and all your data. This action cannot be reversed.',
+              [
+                { text: 'Cancel', style: 'cancel' },
+                {
+                  text: 'Delete forever',
+                  style: 'destructive',
+                  onPress: async () => {
+                    setDeleting(true);
+                    try {
+                      await deleteAccount();
+                      // deleteAccount clears the session; AuthGate will
+                      // redirect to the login screen on the next render.
+                    } catch (e) {
+                      const message =
+                        e instanceof Error
+                          ? e.message
+                          : 'Account deletion failed. Please try again.';
+                      Alert.alert('Couldn’t delete account', message);
+                    } finally {
+                      setDeleting(false);
+                    }
+                  },
+                },
+              ],
+            );
+          },
+        },
+      ],
+    );
   };
 
   return (
@@ -86,11 +138,11 @@ export default function SettingsScreen() {
 
       <Pressable
         onPress={confirmSignOut}
-        disabled={signingOut}
+        disabled={signingOut || deleting}
         style={({ pressed }) => [
           styles.signOut,
           pressed && { opacity: 0.85 },
-          signingOut && { opacity: 0.5 },
+          (signingOut || deleting) && { opacity: 0.5 },
         ]}>
         <Ionicons name="log-out-outline" size={18} color={Brand.danger} />
         <Text
@@ -98,6 +150,23 @@ export default function SettingsScreen() {
           color={Brand.danger}
           allowFontScaling={false}>
           {signingOut ? 'Signing out…' : 'Sign out'}
+        </Text>
+      </Pressable>
+
+      <Pressable
+        onPress={confirmDeleteAccount}
+        disabled={deleting || signingOut}
+        style={({ pressed }) => [
+          styles.deleteAccount,
+          pressed && { opacity: 0.85 },
+          (deleting || signingOut) && { opacity: 0.5 },
+        ]}>
+        <Ionicons name="trash-outline" size={18} color={Brand.danger} />
+        <Text
+          style={styles.deleteAccountLabel}
+          color={Brand.danger}
+          allowFontScaling={false}>
+          {deleting ? 'Deleting account…' : 'Delete account'}
         </Text>
       </Pressable>
     </ScrollView>
@@ -242,5 +311,19 @@ const styles = StyleSheet.create({
   signOutLabel: {
     fontSize: 16,
     fontWeight: '600',
+  },
+  deleteAccount: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: Spacing.md,
+    backgroundColor: 'transparent',
+    borderRadius: 14,
+    marginTop: Spacing.md,
+  },
+  deleteAccountLabel: {
+    fontSize: 15,
+    fontWeight: '500',
   },
 });

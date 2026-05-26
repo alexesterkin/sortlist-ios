@@ -1,6 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
+import * as AppleAuthentication from 'expo-apple-authentication';
 import { Link, router } from 'expo-router';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   Alert,
   Keyboard,
@@ -23,7 +24,8 @@ const HOME_ROUTE = '/(app)';
 
 export default function LoginScreen() {
   const insets = useSafeAreaInsets();
-  const { signInWithEmail, registerWithEmail, signInWithGoogle } = useAuth();
+  const { signInWithEmail, registerWithEmail, signInWithGoogle, signInWithApple } =
+    useAuth();
 
   const [mode, setMode] = useState<'login' | 'register'>('login');
   const [name, setName] = useState('');
@@ -31,13 +33,48 @@ export default function LoginScreen() {
   const [password, setPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
+  const [appleAvailable, setAppleAvailable] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Hide the Apple button entirely if the device can't support it (iPad
+  // running iOS < 13, simulator without an Apple ID, etc.). On Android it's
+  // never available; we never reach this branch since the app is iOS-only.
+  useEffect(() => {
+    let cancelled = false;
+    if (Platform.OS !== 'ios') return;
+    AppleAuthentication.isAvailableAsync()
+      .then((ok) => {
+        if (!cancelled) setAppleAvailable(ok);
+      })
+      .catch(() => {
+        if (!cancelled) setAppleAvailable(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Navigate to the sortlists home directly. Never call router.back() — on
   // a fresh launch there's nothing to go back to, and expo-router would
   // throw GO_BACK.
   const goHome = () => {
     router.replace(HOME_ROUTE as never);
+  };
+
+  const onApple = async () => {
+    setError(null);
+    try {
+      await signInWithApple();
+      // signInWithApple resolves with no return value on user cancel too.
+      // Calling goHome on cancel bounces through AuthGate back to /login —
+      // same edge-case behavior as the Google flow, so we don't special-case.
+      goHome();
+    } catch (e: unknown) {
+      const message =
+        e instanceof Error ? e.message : 'Sign in with Apple failed.';
+      setError(message);
+      Alert.alert('Sign in', message);
+    }
   };
 
   const submit = async () => {
@@ -191,6 +228,25 @@ export default function LoginScreen() {
               <View style={styles.line} />
             </View>
 
+            {/* Apple Sign-In above Google to satisfy App Store HIG: the Apple
+                button must be at least as prominent as third-party social
+                buttons. The native AppleAuthenticationButton enforces Apple's
+                exact spec (corner radius, font, logo padding) — using a
+                custom button here would risk rejection. */}
+            {appleAvailable ? (
+              <AppleAuthentication.AppleAuthenticationButton
+                buttonType={
+                  AppleAuthentication.AppleAuthenticationButtonType.SIGN_IN
+                }
+                buttonStyle={
+                  AppleAuthentication.AppleAuthenticationButtonStyle.BLACK
+                }
+                cornerRadius={12}
+                style={styles.appleButton}
+                onPress={onApple}
+              />
+            ) : null}
+
             <Button
               title="Continue with Google"
               variant="outline"
@@ -309,5 +365,12 @@ const styles = StyleSheet.create({
   },
   switchMode: {
     paddingVertical: Spacing.sm,
+  },
+  appleButton: {
+    // Match the other auth-button heights so the Apple and Google buttons
+    // line up vertically. Apple's HIG specifies a minimum height of 30, but
+    // matching our other buttons at 48 reads cleanly within the form.
+    width: '100%',
+    height: 48,
   },
 });

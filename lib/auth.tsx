@@ -1,3 +1,4 @@
+import * as AppleAuthentication from 'expo-apple-authentication';
 import * as WebBrowser from 'expo-web-browser';
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { Platform } from 'react-native';
@@ -28,7 +29,9 @@ type AuthState = {
   signInWithEmail: (email: string, password: string) => Promise<void>;
   registerWithEmail: (name: string, email: string, password: string) => Promise<void>;
   signInWithGoogle: () => Promise<void>;
+  signInWithApple: () => Promise<void>;
   signOut: () => Promise<void>;
+  deleteAccount: () => Promise<void>;
   refresh: () => Promise<void>;
 };
 
@@ -59,6 +62,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const loginMutation = trpc.auth.login.useMutation();
   const registerMutation = trpc.auth.register.useMutation();
   const logoutMutation = trpc.auth.logout.useMutation();
+  const appleMutation = trpc.auth.signInWithApple.useMutation();
+  const deleteAccountMutation = trpc.auth.deleteAccount.useMutation();
 
   useEffect(() => {
     log('hydrating: loading session token from AsyncStorage');
@@ -195,6 +200,85 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     log('signInWithGoogle: success, user loaded');
   }, [me]);
 
+  // Sign in with Apple — required by Apple App Store Guideline 4.8 since we
+  // offer "Continue with Google". Uses the native AuthenticationServices
+  // sheet via expo-apple-authentication; no WebBrowser dance, no
+  // redirect_uri plumbing. Apple gives us an identityToken (a JWT signed
+  // with one of their published JWKs) which the backend verifies, upserts
+  // the user, and returns our own session JWT.
+  //
+  // Apple only returns fullName on the FIRST sign-in (and only if the user
+  // didn't tap "Hide my email"). On subsequent sign-ins it's null even for
+  // the same Apple ID, so we forward whatever we got and let the backend
+  // decide whether to apply it.
+  const signInWithApple = useCallback(async () => {
+    if (Platform.OS !== 'ios') {
+      throw new Error('Sign in with Apple is only available on iOS.');
+    }
+    const available = await AppleAuthentication.isAvailableAsync();
+    if (!available) {
+      throw new Error('Sign in with Apple isn’t available on this device.');
+    }
+
+    log('signInWithApple: requesting credentials');
+    let credential: AppleAuthentication.AppleAuthenticationCredential;
+    try {
+      credential = await AppleAuthentication.signInAsync({
+        requestedScopes: [
+          AppleAuthentication.AppleAuthenticationScope.FULL_NAME,
+          AppleAuthentication.AppleAuthenticationScope.EMAIL,
+        ],
+      });
+    } catch (e) {
+      const code = (e as { code?: string }).code;
+      // ERR_REQUEST_CANCELED is the user dismissing the sheet — silent no-op.
+      if (code === 'ERR_REQUEST_CANCELED') {
+        log('signInWithApple: user cancelled');
+        return;
+      }
+      throw e;
+    }
+
+    if (!credential.identityToken) {
+      throw new Error('Apple didn’t return an identity token.');
+    }
+    log(
+      'signInWithApple: got credential, tokenLen=',
+      credential.identityToken.length,
+      'firstSignIn?',
+      !!credential.fullName?.givenName || !!credential.fullName?.familyName,
+    );
+
+    const result = await appleMutation.mutateAsync({
+      identityToken: credential.identityToken,
+      fullName: credential.fullName
+        ? {
+            givenName: credential.fullName.givenName ?? null,
+            familyName: credential.fullName.familyName ?? null,
+          }
+        : null,
+    });
+
+    const token =
+      typeof result === 'object' &&
+      result !== null &&
+      'token' in result &&
+      typeof (result as { token: unknown }).token === 'string'
+        ? (result as { token: string }).token
+        : null;
+    if (!token) {
+      throw new Error('Apple sign-in succeeded but no session token came back.');
+    }
+    await setSessionToken(token);
+
+    log('signInWithApple: refetching auth.me');
+    const refreshed = await me.refetch();
+    if (!refreshed.data) {
+      throw new Error(buildLoadFailureMessage('signInWithApple', refreshed));
+    }
+    log('signInWithApple: success, user loaded');
+  }, [appleMutation, me]);
+
   const signOut = useCallback(async () => {
     log('signOut: calling auth.logout + clearing local cookie');
     try {
@@ -205,6 +289,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     await setSessionToken(null);
     await me.refetch();
   }, [logoutMutation, me]);
+
+  // Permanently deletes the user and all their data on the backend (Apple
+  // Guideline 5.1.1(v)), then clears the local session so AuthGate bounces
+  // back to the login screen. Caller is responsible for the confirmation UI.
+  const deleteAccount = useCallback(async () => {
+    log('deleteAccount: calling auth.deleteAccount');
+    await deleteAccountMutation.mutateAsync();
+    await setSessionToken(null);
+    await me.refetch();
+  }, [deleteAccountMutation, me]);
 
   const refresh = useCallback(async () => {
     await me.refetch();
@@ -220,7 +314,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       signInWithEmail,
       registerWithEmail,
       signInWithGoogle,
+      signInWithApple,
       signOut,
+      deleteAccount,
       refresh,
     }),
     [
@@ -230,7 +326,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       signInWithEmail,
       registerWithEmail,
       signInWithGoogle,
+      signInWithApple,
       signOut,
+      deleteAccount,
       refresh,
     ],
   );
