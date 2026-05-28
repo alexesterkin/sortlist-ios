@@ -29,9 +29,13 @@ class ShareExtensionPreprocessor {
     } catch (e) {
       // Never let an exception escape — Safari treats a thrown error as
       // "no preprocessing result" and the SE then loses both the real
-      // URL and the scraped metadata. Always return *something*.
+      // URL and the scraped metadata. Always return *something* with at
+      // least a URL field populated via the same fallback chain
+      // scrape() uses, so the Swift side has something to work with
+      // even when DOM access blows up mid-scrape on heavy retailer pages
+      // (Marks & Spencer, Zara, etc. — see Build 27 incident).
       extArgs.completionFunction({
-        url: (window.location && window.location.href) || '',
+        url: this.findUrl(),
         error: String(e && (e.message || e)),
       });
     }
@@ -42,7 +46,7 @@ class ShareExtensionPreprocessor {
   }
 
   scrape() {
-    const url = window.location.href;
+    const url = this.findUrl();
     return {
       url: url,
       title: this.findTitle(),
@@ -51,6 +55,49 @@ class ShareExtensionPreprocessor {
       currency: this.findCurrency(),
       siteName: this.findSiteName(url),
     };
+  }
+
+  // Robust URL resolver. window.location.href is the obvious source but
+  // can be empty/unavailable in edge cases observed on heavy retailer
+  // pages: mid-navigation, location getters overridden by site JS,
+  // detached document contexts after a long preprocessor wait. document
+  // exposes several other authoritative URL views — try them in order
+  // and accept the first non-empty one. Returns '' (never undefined)
+  // so the caller can rely on a string downstream.
+  findUrl() {
+    try {
+      if (typeof window !== 'undefined' && window.location && window.location.href) {
+        return window.location.href;
+      }
+    } catch (e) { /* ignore */ }
+    try {
+      if (typeof document !== 'undefined' && document.URL) {
+        return document.URL;
+      }
+    } catch (e) { /* ignore */ }
+    try {
+      if (typeof document !== 'undefined' && document.documentURI) {
+        return document.documentURI;
+      }
+    } catch (e) { /* ignore */ }
+    try {
+      if (typeof document !== 'undefined' && document.baseURI) {
+        return document.baseURI;
+      }
+    } catch (e) { /* ignore */ }
+    // og:url is the last-resort signal — many retailers (M&S included)
+    // emit it server-side, so it's present even if the JS environment
+    // is hostile by the time we run.
+    try {
+      if (typeof document !== 'undefined') {
+        const el = document.querySelector('meta[property="og:url" i], meta[name="og:url" i]');
+        if (el) {
+          const v = (el.getAttribute('content') || '').trim();
+          if (v) return v;
+        }
+      }
+    } catch (e) { /* ignore */ }
+    return '';
   }
 
   // ── Helpers ──────────────────────────────────────────────────────────

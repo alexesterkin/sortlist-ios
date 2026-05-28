@@ -186,45 +186,111 @@ final class ShareViewController: UIViewController {
         state = .loading(message: "Reading shared link…")
         extractSharedItem { [weak self] in
             guard let self = self, let rawUrl = self.sharedURL else { return }
-            // Some retailers' in-page Share buttons hand iOS a wrapper /
-            // redirect URL (amzn.eu/d/…, share.amazon.com/…, a.co/d/…,
-            // bit.ly/…, t.co/…) instead of the actual product page. Run
-            // a HEAD request first to let URLSession follow HTTP 30x
-            // redirects to the final URL, then proceed with that. If the
-            // URL is already a direct product page no redirect happens
-            // and this just costs us one extra round-trip (~100-300 ms).
-            //
-            // The fallback path (.failure to resolve, timeout, custom-scheme
-            // redirect target like amzn://, etc.) just reuses the original
-            // URL so worst case we behave the same as before this change.
-            // Inner closure captures `self` strongly via inheritance from
-            // the guard-let-unwrapped scope above. That's intentional and
-            // safe for a Share Extension: the SE process is short-lived
-            // (iOS reaps it shortly after dismissal anyway), the HEAD
-            // request has a 4-second timeout, and a strong reference for
-            // those few seconds is fine. Re-doing `[weak self]` + the
-            // optional-unwrap dance inside the inner closures confused
-            // Swift's type checker — see the Build 20/21 compile error.
-            self.resolveFinalURL(from: rawUrl) { resolvedUrl in
-                DispatchQueue.main.async {
-                    self.sharedURL = resolvedUrl
-                    // We come out of extractSharedItem with the URL AND,
-                    // when the user shared from Safari (the common path),
-                    // with scraped data populated by the JS preprocessor —
-                    // title, image, price, etc. Render the preview card
-                    // IMMEDIATELY using whatever the JS gave us.
-                    // Server-side meta.fetch and collections.list run in
-                    // the background to fill in any gaps and the picker
-                    // menu.
-                    self.rebuildPickerMenu()
-                    self.state = .ready
-                    if let imgUrl = self.scrapedProduct?.imageUrl, !imgUrl.isEmpty {
-                        self.loadProductImage(from: imgUrl)
-                    }
-                    self.loadBackgroundData(url: resolvedUrl, jwt: token)
+            self.continueWithSharedUrl(rawUrl)
+        }
+    }
+
+    // Post-extraction flow: resolve any redirect-wrapper URLs, then render
+    // the ready state and fan out to background data loads. Lifted into
+    // its own method so both extractSharedItem's success path AND the
+    // manual paste-URL recovery (see promptForManualUrl) can run it.
+    //
+    // Some retailers' in-page Share buttons hand iOS a wrapper / redirect
+    // URL (amzn.eu/d/…, share.amazon.com/…, a.co/d/…, bit.ly/…, t.co/…)
+    // instead of the actual product page. The HEAD-and-follow lets
+    // URLSession follow HTTP 30x to the final URL before we hand it to
+    // the scraper. Falls back to the original URL on any error
+    // (timeout, non-http(s) chain end, etc.) so worst case is identical
+    // to skipping the redirect step.
+    //
+    // Strong-capture of self in the inner closure is intentional and safe
+    // here: the SE process is short-lived, the HEAD has a 4s timeout,
+    // and Swift's type-checker chokes on the [weak self] dance inside
+    // the inner closure (Build 20/21 compile error). jwt is read from
+    // self.jwt which was set during viewDidLoad before any extraction
+    // could have completed.
+    private func continueWithSharedUrl(_ rawUrl: String) {
+        guard let token = self.jwt else {
+            state = .error(message: "Open Sortlist and sign in first.", detail: nil)
+            return
+        }
+        self.resolveFinalURL(from: rawUrl) { resolvedUrl in
+            DispatchQueue.main.async {
+                self.sharedURL = resolvedUrl
+                // We come out of extractSharedItem with the URL AND,
+                // when the user shared from Safari (the common path),
+                // with scraped data populated by the JS preprocessor —
+                // title, image, price, etc. Render the preview card
+                // IMMEDIATELY using whatever the JS gave us.
+                // Server-side meta.fetch and collections.list run in
+                // the background to fill in any gaps and the picker
+                // menu.
+                self.rebuildPickerMenu()
+                self.state = .ready
+                if let imgUrl = self.scrapedProduct?.imageUrl, !imgUrl.isEmpty {
+                    self.loadProductImage(from: imgUrl)
                 }
+                self.loadBackgroundData(url: resolvedUrl, jwt: token)
             }
         }
+    }
+
+    // Manual recovery path: when extractSharedItem couldn't pull a URL
+    // out of the share payload (heavy-JS retailer pages where Safari's
+    // JS preprocessor returns empty, in-page Web Share buttons that
+    // pass non-URL content, etc. — see Build 27 M&S incident), don't
+    // dead-end. Show a UIAlertController with a URL field pre-filled
+    // from the clipboard if it looks URL-shaped, and on submit run the
+    // same continueWithSharedUrl flow the normal extraction would have.
+    //
+    // The reason string is the original failure message — surfaced as
+    // the alert subtitle so the user knows why they're being asked to
+    // paste. On Cancel, we fall back to the original fatal error
+    // screen with the reason text — same UX as before this fix.
+    private func promptForManualUrl(reason: String) {
+        let alert = UIAlertController(
+            title: "Couldn’t read shared content",
+            message: reason + "\n\nPaste a product URL to save it:",
+            preferredStyle: .alert
+        )
+        alert.addTextField { tf in
+            tf.placeholder = "https://…"
+            tf.keyboardType = .URL
+            tf.autocapitalizationType = .none
+            tf.autocorrectionType = .no
+            tf.spellCheckingType = .no
+            // Pre-fill from the clipboard if it looks URL-shaped — saves a
+            // tap when the user just copied the URL out of Safari's address
+            // bar before tapping Share.
+            if let clip = UIPasteboard.general.string?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+               clip.range(of: #"^https?://\S+"#, options: .regularExpression) != nil {
+                tf.text = clip
+            }
+        }
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { [weak self] _ in
+            self?.state = .error(message: reason, detail: nil)
+        })
+        alert.addAction(UIAlertAction(title: "Save", style: .default) { [weak self] _ in
+            guard let self = self else { return }
+            let raw = (alert.textFields?.first?.text ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard
+                let url = URL(string: raw),
+                let scheme = url.scheme?.lowercased(),
+                scheme == "http" || scheme == "https"
+            else {
+                self.state = .error(
+                    message: "That doesn’t look like a valid URL.",
+                    detail: nil
+                )
+                return
+            }
+            self.sharedURL = raw
+            self.state = .loading(message: "Reading shared link…")
+            self.continueWithSharedUrl(raw)
+        })
+        present(alert, animated: true)
     }
 
     // MARK: - Redirect resolution
@@ -931,7 +997,8 @@ final class ShareViewController: UIViewController {
             }
         }
         if allAttachments.isEmpty {
-            state = .error(message: "Nothing shareable found.", detail: nil)
+            // Recoverable — let the user paste a URL instead of dead-ending.
+            promptForManualUrl(reason: "Nothing shareable found.")
             return
         }
 
@@ -1025,7 +1092,8 @@ final class ShareViewController: UIViewController {
             return nil
         }
         if textProviders.isEmpty {
-            state = .error(message: "Nothing shareable found.", detail: nil)
+            // Recoverable — let the user paste a URL instead of dead-ending.
+            promptForManualUrl(reason: "Nothing shareable found.")
             return
         }
         tryNextTextProvider(textProviders, index: 0, completion: completion)
@@ -1037,7 +1105,8 @@ final class ShareViewController: UIViewController {
         completion: @escaping () -> Void
     ) {
         if index >= providers.count {
-            state = .error(message: "No link found in shared text.", detail: nil)
+            // Recoverable — let the user paste a URL instead of dead-ending.
+            promptForManualUrl(reason: "No link found in shared text.")
             return
         }
         let (provider, typeId) = providers[index]
