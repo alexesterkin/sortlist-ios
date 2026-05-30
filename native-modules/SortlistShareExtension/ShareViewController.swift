@@ -235,33 +235,203 @@ final class ShareViewController: UIViewController {
         }
     }
 
-    // Manual recovery path: when extractSharedItem couldn't pull a URL
-    // out of the share payload (heavy-JS retailer pages where Safari's
-    // JS preprocessor returns empty, in-page Web Share buttons that
-    // pass non-URL content, etc. — see Build 27 M&S incident), don't
-    // dead-end. Show a UIAlertController with a URL field pre-filled
-    // from the clipboard if it looks URL-shaped, and on submit run the
-    // same continueWithSharedUrl flow the normal extraction would have.
+    // Last-line recovery. Two layers:
     //
-    // The reason string is the original failure message — surfaced as
-    // the alert subtitle so the user knows why they're being asked to
-    // paste. On Cancel, we fall back to the original fatal error
-    // screen with the reason text — same UX as before this fix.
-    private func promptForManualUrl(reason: String) {
+    //   1. searchAdditionalUrlSources — purely additive: tries
+    //      NSExtensionItem.attributedContentText (across all input
+    //      items), NSExtensionItem.attributedTitle, then every
+    //      property-list attachment scanned recursively for any string
+    //      value matching an http(s) URL regex. If iOS stashed the
+    //      page URL in any of these (which is common on heavy-CSP
+    //      retailer pages like M&S where our JS preprocessor returns
+    //      empty), we recover silently and the dialog never appears.
+    //
+    //   2. showManualUrlDialog — only fires if step 1 also turns up
+    //      nothing. Reframed copy ("Retailer restrictions") avoids
+    //      blaming Sortlist for the failure.
+    //
+    // Safe by construction for the working path: Amazon / Quince /
+    // Costa Farms / etc. resolve their URL in extractSharedItem Step 1
+    // (JS preprocessor) and never reach this method.
+    private func promptForManualUrl() {
+        searchAdditionalUrlSources { [weak self] foundUrl in
+            guard let self = self else { return }
+            if let url = foundUrl {
+                // Recovered without the dialog — that's the goal for
+                // every Safari share.
+                NSLog("%@", "[SE-fallback] recovered without prompting: \(url)" as NSString)
+                self.sharedURL = url
+                self.state = .loading(message: "Reading shared link…")
+                self.continueWithSharedUrl(url)
+                return
+            }
+            self.showManualUrlDialog()
+        }
+    }
+
+    /// Additional-source URL search. Runs ONLY when the standard
+    /// extraction path (Step 1 preprocessor → Step 2 public.url →
+    /// Step 3 text providers) all fail to produce a URL. Never touches
+    /// the working path — retailers that succeed in Step 1 exit before
+    /// this method is reached, so behaviour on Amazon / Quince /
+    /// Costa Farms / etc. is unchanged.
+    ///
+    /// Tries in order:
+    ///   A. NSExtensionItem.attributedContentText (each input item)
+    ///   B. NSExtensionItem.attributedTitle (each input item)
+    ///   C. Every com.apple.property-list attachment, scanning every
+    ///      string leaf in the outer dict recursively for an http(s) URL
+    ///
+    /// All NSLog diagnostics live in this fallback path so they never
+    /// add noise to working flows.
+    private func searchAdditionalUrlSources(completion: @escaping (String?) -> Void) {
+        guard let ctx = extensionContext else {
+            completion(nil)
+            return
+        }
+        let items = ctx.inputItems.compactMap { $0 as? NSExtensionItem }
+        NSLog("%@", "[SE-fallback] starting search across \(items.count) input item(s)" as NSString)
+
+        // A — NSExtensionItem.attributedContentText
+        for item in items {
+            if let text = item.attributedContentText?.string,
+               let url = firstHttpUrl(in: text) {
+                NSLog("%@", "[SE-fallback] resolved via attributedContentText: \(url)" as NSString)
+                completion(url)
+                return
+            }
+        }
+        NSLog("[SE-fallback] attributedContentText: no URL")
+
+        // B — NSExtensionItem.attributedTitle
+        for item in items {
+            if let text = item.attributedTitle?.string,
+               let url = firstHttpUrl(in: text) {
+                NSLog("%@", "[SE-fallback] resolved via attributedTitle: \(url)" as NSString)
+                completion(url)
+                return
+            }
+        }
+        NSLog("[SE-fallback] attributedTitle: no URL")
+
+        // C — every property-list attachment, recursive string scan
+        let allAttachments = items.flatMap { $0.attachments ?? [] }
+        let plProviders = allAttachments.filter {
+            $0.hasItemConformingToTypeIdentifier(UTType.propertyList.identifier)
+        }
+        if plProviders.isEmpty {
+            NSLog("[SE-fallback] no property-list attachments to scan")
+            completion(nil)
+            return
+        }
+        scanPropertyListAttachments(plProviders, index: 0, completion: completion)
+    }
+
+    /// Recursive worker for source C. Loads each property-list
+    /// attachment in turn; first http(s) URL found across any string
+    /// leaf wins.
+    private func scanPropertyListAttachments(
+        _ providers: [NSItemProvider],
+        index: Int,
+        completion: @escaping (String?) -> Void
+    ) {
+        if index >= providers.count {
+            NSLog("%@", "[SE-fallback] property-list scan exhausted (\(providers.count) attachment(s)), no URL" as NSString)
+            completion(nil)
+            return
+        }
+        let provider = providers[index]
+        provider.loadItem(forTypeIdentifier: UTType.propertyList.identifier, options: nil) { [weak self] data, _ in
+            DispatchQueue.main.async {
+                guard let self = self else { completion(nil); return }
+                if let url = self.findUrlInAny(data) {
+                    NSLog("%@", "[SE-fallback] resolved via property-list #\(index): \(url)" as NSString)
+                    completion(url)
+                    return
+                }
+                self.scanPropertyListAttachments(providers, index: index + 1, completion: completion)
+            }
+        }
+    }
+
+    /// Walk an arbitrary property-list value (dict / array / string /
+    /// URL / nested) and return the first http(s) URL found in any
+    /// string leaf. Handles both [String: Any] and [AnyHashable: Any]
+    /// dicts because property lists can deserialize as either.
+    private func findUrlInAny(_ any: Any?) -> String? {
+        guard let any = any else { return nil }
+        if let str = any as? String {
+            return firstHttpUrl(in: str)
+        }
+        if let url = any as? URL {
+            return firstHttpUrl(in: url.absoluteString)
+        }
+        if let nsurl = any as? NSURL, let s = nsurl.absoluteString {
+            return firstHttpUrl(in: s)
+        }
+        if let dict = any as? [String: Any] {
+            for (_, v) in dict {
+                if let url = findUrlInAny(v) { return url }
+            }
+            return nil
+        }
+        if let dict = any as? [AnyHashable: Any] {
+            for (_, v) in dict {
+                if let url = findUrlInAny(v) { return url }
+            }
+            return nil
+        }
+        if let arr = any as? [Any] {
+            for v in arr {
+                if let url = findUrlInAny(v) { return url }
+            }
+            return nil
+        }
+        return nil
+    }
+
+    /// Extract the first http(s) URL from arbitrary text. Trims common
+    /// trailing punctuation that regex \S+ over-greedily includes,
+    /// then validates the scheme is http(s). Returns the canonicalised
+    /// absoluteString or nil.
+    private func firstHttpUrl(in text: String) -> String? {
+        guard let range = text.range(of: #"https?://\S+"#, options: .regularExpression) else {
+            return nil
+        }
+        var s = String(text[range])
+        while let last = s.last, ",.;:)>]\"'".contains(last) {
+            s = String(s.dropLast())
+        }
+        guard
+            let parsed = URL(string: s),
+            let scheme = parsed.scheme?.lowercased(),
+            scheme == "http" || scheme == "https"
+        else {
+            return nil
+        }
+        return parsed.absoluteString
+    }
+
+    /// Genuine paste-required path. Only reached when both standard
+    /// extraction AND the additional-source search came up empty —
+    /// most likely a share from a non-browser app with no URL anywhere
+    /// in the payload, or a particularly hostile retailer page. Copy
+    /// is framed as "retailer restrictions" so the user sees the cause
+    /// rather than blaming Sortlist.
+    private func showManualUrlDialog() {
         let alert = UIAlertController(
-            title: "Couldn’t read shared content",
-            message: reason + "\n\nPaste a product URL to save it:",
+            title: "Retailer restrictions",
+            message: "This site limits automatic product detection. Paste the product URL below and we’ll save it for you.",
             preferredStyle: .alert
         )
         alert.addTextField { tf in
-            tf.placeholder = "https://…"
+            tf.placeholder = "https://..."
             tf.keyboardType = .URL
             tf.autocapitalizationType = .none
             tf.autocorrectionType = .no
             tf.spellCheckingType = .no
-            // Pre-fill from the clipboard if it looks URL-shaped — saves a
-            // tap when the user just copied the URL out of Safari's address
-            // bar before tapping Share.
+            // Pre-fill from the clipboard if it looks URL-shaped — saves
+            // a tap when the user just copied the URL out of Safari.
             if let clip = UIPasteboard.general.string?
                 .trimmingCharacters(in: .whitespacesAndNewlines),
                clip.range(of: #"^https?://\S+"#, options: .regularExpression) != nil {
@@ -269,7 +439,7 @@ final class ShareViewController: UIViewController {
             }
         }
         alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { [weak self] _ in
-            self?.state = .error(message: reason, detail: nil)
+            self?.state = .error(message: "Sharing cancelled.", detail: nil)
         })
         alert.addAction(UIAlertAction(title: "Save", style: .default) { [weak self] _ in
             guard let self = self else { return }
@@ -997,8 +1167,9 @@ final class ShareViewController: UIViewController {
             }
         }
         if allAttachments.isEmpty {
-            // Recoverable — let the user paste a URL instead of dead-ending.
-            promptForManualUrl(reason: "Nothing shareable found.")
+            // Recoverable — fall through to additional-source search,
+            // then dialog only if those also fail.
+            promptForManualUrl()
             return
         }
 
@@ -1092,8 +1263,9 @@ final class ShareViewController: UIViewController {
             return nil
         }
         if textProviders.isEmpty {
-            // Recoverable — let the user paste a URL instead of dead-ending.
-            promptForManualUrl(reason: "Nothing shareable found.")
+            // Recoverable — fall through to additional-source search,
+            // then dialog only if those also fail.
+            promptForManualUrl()
             return
         }
         tryNextTextProvider(textProviders, index: 0, completion: completion)
@@ -1105,8 +1277,9 @@ final class ShareViewController: UIViewController {
         completion: @escaping () -> Void
     ) {
         if index >= providers.count {
-            // Recoverable — let the user paste a URL instead of dead-ending.
-            promptForManualUrl(reason: "No link found in shared text.")
+            // Recoverable — fall through to additional-source search,
+            // then dialog only if those also fail.
+            promptForManualUrl()
             return
         }
         let (provider, typeId) = providers[index]
