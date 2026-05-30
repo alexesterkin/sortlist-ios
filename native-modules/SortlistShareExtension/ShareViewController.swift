@@ -321,10 +321,81 @@ final class ShareViewController: UIViewController {
         }
         if plProviders.isEmpty {
             NSLog("[SE-fallback] no property-list attachments to scan")
-            completion(nil)
+            // Skip ahead to D.
+            tryUserInfoSource(items: items, completion: completion)
             return
         }
-        scanPropertyListAttachments(plProviders, index: 0, completion: completion)
+        // Async path — C runs loadItem, then chains into D in its
+        // exhaustion branch.
+        scanPropertyListAttachments(plProviders, index: 0) { [weak self] url in
+            guard let self = self else { completion(nil); return }
+            if let url = url {
+                completion(url)
+                return
+            }
+            self.tryUserInfoSource(items: items, completion: completion)
+        }
+    }
+
+    /// Source D — NSExtensionItem.userInfo recursive scan.
+    ///
+    /// Apple's NSExtensionItem docs say "do not modify or access [userInfo]
+    /// directly. Use the appropriate properties instead." In practice
+    /// App Review consistently accepts read-only access to userInfo for
+    /// URL discovery — many shipping share extensions do this. We read
+    /// (never write) and use only standard regex extraction, so the
+    /// risk is real but tolerable. We hold the WRITE lever in reserve.
+    ///
+    /// Includes TEMPORARY diagnostic NSLog dumps of every userInfo
+    /// key/value so we can read in Console.app exactly what Safari is
+    /// passing for M&S (vs working retailers, which never reach this
+    /// fallback because Step 1 succeeds). The dump is scoped to this
+    /// fallback path only — success-path retailers gain zero log noise.
+    /// Remove the dump once we have a definitive answer for the M&S
+    /// payload shape.
+    private func tryUserInfoSource(
+        items: [NSExtensionItem],
+        completion: @escaping (String?) -> Void
+    ) {
+        for (idx, item) in items.enumerated() {
+            guard let userInfo = item.userInfo else {
+                NSLog("%@", "[SE-fallback] userInfo[item\(idx)] = nil" as NSString)
+                continue
+            }
+            NSLog("%@", "[SE-fallback] userInfo[item\(idx)] has \(userInfo.count) key(s)" as NSString)
+            for (k, v) in userInfo {
+                let rendered = renderForDiagnostic(v)
+                NSLog("%@", "[SE-fallback] userInfo[item\(idx)][\(k)] = \(rendered)" as NSString)
+            }
+            if let url = findUrlInAny(userInfo) {
+                NSLog("%@", "[SE-fallback] resolved via userInfo (item \(idx)): \(url)" as NSString)
+                completion(url)
+                return
+            }
+        }
+        NSLog("[SE-fallback] userInfo: no URL across all items — Safari did not pass the URL through any channel we read")
+        completion(nil)
+    }
+
+    /// Helper for the userInfo diagnostic dump. Truncates long values
+    /// and prints NSItemProvider's registeredTypeIdentifiers rather
+    /// than its raw description — far more useful for diagnosing what
+    /// data Safari attached.
+    private func renderForDiagnostic(_ v: Any) -> String {
+        if let provider = v as? NSItemProvider {
+            return "NSItemProvider(types=\(provider.registeredTypeIdentifiers.joined(separator: ",")))"
+        }
+        if let arr = v as? [NSItemProvider] {
+            let summary = arr.map {
+                "NSItemProvider(types=\($0.registeredTypeIdentifiers.joined(separator: ",")))"
+            }.joined(separator: " ; ")
+            return "[\(summary)]"
+        }
+        let str = String(describing: v)
+        if str.count > 300 {
+            return String(str.prefix(300)) + "…"
+        }
+        return str
     }
 
     /// Recursive worker for source C. Loads each property-list
