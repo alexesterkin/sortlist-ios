@@ -108,6 +108,20 @@ final class ShareViewController: UIViewController {
     // completion handler — keeps the scraper alive across the async load.
     private var onDeviceScraper: OnDeviceScraper?
 
+    // 5-second "let the user save anyway" timeout. After the URL is in
+    // hand, both the on-device WKWebView scrape and server meta.fetch
+    // run in the background to fill in title/image/price. If neither
+    // returns within the timeout (slow network, ScraperAPI hiccup, or
+    // a particularly slow retailer), we flip to .ready with placeholder
+    // metadata so the save button is reachable. Backend continues
+    // scraping; the preview card updates in place if data arrives
+    // later, but the user is no longer blocked.
+    private var readyTimeoutTimer: Timer?
+    // Tracks whether we've reached .ready (via fast path OR timeout).
+    // Used by loadBackgroundData callbacks to decide whether to also
+    // trigger the .ready transition or just refresh the preview card.
+    private var hasReachedReady = false
+
     // MARK: - Subviews
 
     // Always-present chrome
@@ -190,10 +204,12 @@ final class ShareViewController: UIViewController {
         }
     }
 
-    // Post-extraction flow: resolve any redirect-wrapper URLs, then render
-    // the ready state and fan out to background data loads. Lifted into
-    // its own method so both extractSharedItem's success path AND the
-    // manual paste-URL recovery (see promptForManualUrl) can run it.
+    // Post-extraction flow: resolve any redirect-wrapper URLs, set the
+    // host-aware loading state, arm the 5s "save anyway" timeout, then
+    // fan out to background data loads. The paste-recovery method that
+    // used to share this code was removed in v1.1 build 31 when we
+    // dropped the JS preprocessor — URL extraction is now reliable
+    // enough that recovery isn't needed.
     //
     // Some retailers' in-page Share buttons hand iOS a wrapper / redirect
     // URL (amzn.eu/d/…, share.amazon.com/…, a.co/d/…, bit.ly/…, t.co/…)
@@ -217,322 +233,177 @@ final class ShareViewController: UIViewController {
         self.resolveFinalURL(from: rawUrl) { resolvedUrl in
             DispatchQueue.main.async {
                 self.sharedURL = resolvedUrl
-                // We come out of extractSharedItem with the URL AND,
-                // when the user shared from Safari (the common path),
-                // with scraped data populated by the JS preprocessor —
-                // title, image, price, etc. Render the preview card
-                // IMMEDIATELY using whatever the JS gave us.
-                // Server-side meta.fetch and collections.list run in
-                // the background to fill in any gaps and the picker
-                // menu.
+
+                // Seed scrapedProduct with the friendly host name so the
+                // loading state can display "Saving from Marks & Spencer…"
+                // (rather than a generic spinner with no context). The
+                // background scrape will overwrite the placeholder when
+                // real data arrives.
+                let friendly = self.friendlyHostName(from: resolvedUrl)
+                self.scrapedProduct = ScrapedProduct(
+                    title: nil,
+                    imageUrl: nil,
+                    price: nil,
+                    currency: nil,
+                    siteName: friendly
+                )
+
                 self.rebuildPickerMenu()
-                self.state = .ready
-                if let imgUrl = self.scrapedProduct?.imageUrl, !imgUrl.isEmpty {
-                    self.loadProductImage(from: imgUrl)
-                }
+                self.state = .loading(message: "Saving from \(friendly)…")
+
+                // Arm the 5-second timeout. If neither on-device nor server
+                // scrape has returned by then, flip to .ready with what
+                // we have (just URL + siteName) so the save button is
+                // reachable. Background scrape continues; preview card
+                // updates in place if data arrives later.
+                self.armReadyTimeout()
+
                 self.loadBackgroundData(url: resolvedUrl, jwt: token)
             }
         }
     }
 
-    // Last-line recovery. Two layers:
-    //
-    //   1. searchAdditionalUrlSources — purely additive: tries
-    //      NSExtensionItem.attributedContentText (across all input
-    //      items), NSExtensionItem.attributedTitle, then every
-    //      property-list attachment scanned recursively for any string
-    //      value matching an http(s) URL regex. If iOS stashed the
-    //      page URL in any of these (which is common on heavy-CSP
-    //      retailer pages like M&S where our JS preprocessor returns
-    //      empty), we recover silently and the dialog never appears.
-    //
-    //   2. showManualUrlDialog — only fires if step 1 also turns up
-    //      nothing. Reframed copy ("Retailer restrictions") avoids
-    //      blaming Sortlist for the failure.
-    //
-    // Safe by construction for the working path: Amazon / Quince /
-    // Costa Farms / etc. resolve their URL in extractSharedItem Step 1
-    // (JS preprocessor) and never reach this method.
-    private func promptForManualUrl() {
-        searchAdditionalUrlSources { [weak self] foundUrl in
-            guard let self = self else { return }
-            if let url = foundUrl {
-                // Recovered without the dialog — that's the goal for
-                // every Safari share.
-                NSLog("%@", "[SE-fallback] recovered without prompting: \(url)" as NSString)
-                self.sharedURL = url
-                self.state = .loading(message: "Reading shared link…")
-                self.continueWithSharedUrl(url)
-                return
-            }
-            self.showManualUrlDialog()
+    // MARK: - Friendly host names + ready-state timing
+
+    /// Map a URL to a user-facing retailer name. Falls back to the
+    /// registrable domain title-cased ("marksandspencer.com" → "Marks
+    /// and Spencer"-ish). Used in the loading state ("Saving from X…")
+    /// and as the placeholder siteName until backend scrape returns.
+    ///
+    /// The mapping table is intentionally small — just retailers we
+    /// know our users save from often or whose domain doesn't title-
+    /// case cleanly (M&S, On, Cos, etc.). Anything not in the table
+    /// gets the fallback, which produces reasonable results for the
+    /// long tail (Quince, Reformation, Costa Farms, etc.).
+    private static let retailerFriendlyNames: [String: String] = [
+        "amazon.com": "Amazon",
+        "amazon.co.uk": "Amazon UK",
+        "amazon.de": "Amazon DE",
+        "amazon.fr": "Amazon FR",
+        "amazon.it": "Amazon IT",
+        "amazon.es": "Amazon ES",
+        "marksandspencer.com": "Marks & Spencer",
+        "asos.com": "ASOS",
+        "zara.com": "Zara",
+        "zarahome.com": "Zara Home",
+        "hm.com": "H&M",
+        "www2.hm.com": "H&M",
+        "etsy.com": "Etsy",
+        "ebay.com": "eBay",
+        "ebay.co.uk": "eBay UK",
+        "shopdisney.com": "Disney Store",
+        "ikea.com": "IKEA",
+        "johnlewis.com": "John Lewis",
+        "next.co.uk": "Next",
+        "argos.co.uk": "Argos",
+        "selfridges.com": "Selfridges",
+        "harrods.com": "Harrods",
+        "anthropologie.com": "Anthropologie",
+        "urbanoutfitters.com": "Urban Outfitters",
+        "bestbuy.com": "Best Buy",
+        "target.com": "Target",
+        "walmart.com": "Walmart",
+        "nordstrom.com": "Nordstrom",
+        "macys.com": "Macy's",
+        "saksfifthavenue.com": "Saks",
+        "shein.com": "SHEIN",
+        "uniqlo.com": "Uniqlo",
+        "farfetch.com": "Farfetch",
+        "ssense.com": "SSENSE",
+        "matchesfashion.com": "Matches",
+        "net-a-porter.com": "Net-a-Porter",
+        "mrporter.com": "Mr Porter",
+        "cos.com": "COS",
+        "arket.com": "Arket",
+        "weekday.com": "Weekday",
+        "monki.com": "Monki",
+        "stories.com": "& Other Stories",
+        "reformation.com": "Reformation",
+        "aritzia.com": "Aritzia",
+        "everlane.com": "Everlane",
+        "on.com": "On",
+        "on-running.com": "On",
+        "quince.com": "Quince",
+        "onequince.com": "Quince",
+        "costafarms.com": "Costa Farms",
+        "ikea.co.uk": "IKEA",
+        "westelm.com": "West Elm",
+        "crateandbarrel.com": "Crate & Barrel",
+        "potterybarn.com": "Pottery Barn",
+        "wayfair.com": "Wayfair",
+        "homedepot.com": "Home Depot",
+        "lowes.com": "Lowe's",
+        "sephora.com": "Sephora",
+        "ulta.com": "Ulta",
+    ]
+
+    private func friendlyHostName(from urlString: String) -> String {
+        guard let host = URL(string: urlString)?.host?.lowercased() else {
+            return "this site"
         }
+        let stripped = host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+        if let mapped = Self.retailerFriendlyNames[stripped] {
+            return mapped
+        }
+        // Fallback: take the registrable label (the segment immediately
+        // before the TLD-ish suffix) and title-case it. Not perfect for
+        // compound names but reasonable for the long tail.
+        let parts = stripped.split(separator: ".")
+        if let first = parts.first {
+            return String(first).capitalized
+        }
+        return stripped
     }
 
-    /// Additional-source URL search. Runs ONLY when the standard
-    /// extraction path (Step 1 preprocessor → Step 2 public.url →
-    /// Step 3 text providers) all fail to produce a URL. Never touches
-    /// the working path — retailers that succeed in Step 1 exit before
-    /// this method is reached, so behaviour on Amazon / Quince /
-    /// Costa Farms / etc. is unchanged.
-    ///
-    /// Tries in order:
-    ///   A. NSExtensionItem.attributedContentText (each input item)
-    ///   B. NSExtensionItem.attributedTitle (each input item)
-    ///   C. Every com.apple.property-list attachment, scanning every
-    ///      string leaf in the outer dict recursively for an http(s) URL
-    ///
-    /// All NSLog diagnostics live in this fallback path so they never
-    /// add noise to working flows.
-    private func searchAdditionalUrlSources(completion: @escaping (String?) -> Void) {
-        guard let ctx = extensionContext else {
-            completion(nil)
-            return
-        }
-        let items = ctx.inputItems.compactMap { $0 as? NSExtensionItem }
-        NSLog("%@", "[SE-fallback] starting search across \(items.count) input item(s)" as NSString)
-
-        // A — NSExtensionItem.attributedContentText
-        for item in items {
-            if let text = item.attributedContentText?.string,
-               let url = firstHttpUrl(in: text) {
-                NSLog("%@", "[SE-fallback] resolved via attributedContentText: \(url)" as NSString)
-                completion(url)
-                return
-            }
-        }
-        NSLog("[SE-fallback] attributedContentText: no URL")
-
-        // B — NSExtensionItem.attributedTitle
-        for item in items {
-            if let text = item.attributedTitle?.string,
-               let url = firstHttpUrl(in: text) {
-                NSLog("%@", "[SE-fallback] resolved via attributedTitle: \(url)" as NSString)
-                completion(url)
-                return
-            }
-        }
-        NSLog("[SE-fallback] attributedTitle: no URL")
-
-        // C — every property-list attachment, recursive string scan
-        let allAttachments = items.flatMap { $0.attachments ?? [] }
-        let plProviders = allAttachments.filter {
-            $0.hasItemConformingToTypeIdentifier(UTType.propertyList.identifier)
-        }
-        if plProviders.isEmpty {
-            NSLog("[SE-fallback] no property-list attachments to scan")
-            // Skip ahead to D.
-            tryUserInfoSource(items: items, completion: completion)
-            return
-        }
-        // Async path — C runs loadItem, then chains into D in its
-        // exhaustion branch.
-        scanPropertyListAttachments(plProviders, index: 0) { [weak self] url in
-            guard let self = self else { completion(nil); return }
-            if let url = url {
-                completion(url)
-                return
-            }
-            self.tryUserInfoSource(items: items, completion: completion)
-        }
-    }
-
-    /// Source D — NSExtensionItem.userInfo recursive scan.
-    ///
-    /// Apple's NSExtensionItem docs say "do not modify or access [userInfo]
-    /// directly. Use the appropriate properties instead." In practice
-    /// App Review consistently accepts read-only access to userInfo for
-    /// URL discovery — many shipping share extensions do this. We read
-    /// (never write) and use only standard regex extraction, so the
-    /// risk is real but tolerable. We hold the WRITE lever in reserve.
-    ///
-    /// Includes TEMPORARY diagnostic NSLog dumps of every userInfo
-    /// key/value so we can read in Console.app exactly what Safari is
-    /// passing for M&S (vs working retailers, which never reach this
-    /// fallback because Step 1 succeeds). The dump is scoped to this
-    /// fallback path only — success-path retailers gain zero log noise.
-    /// Remove the dump once we have a definitive answer for the M&S
-    /// payload shape.
-    private func tryUserInfoSource(
-        items: [NSExtensionItem],
-        completion: @escaping (String?) -> Void
-    ) {
-        for (idx, item) in items.enumerated() {
-            guard let userInfo = item.userInfo else {
-                NSLog("%@", "[SE-fallback] userInfo[item\(idx)] = nil" as NSString)
-                continue
-            }
-            NSLog("%@", "[SE-fallback] userInfo[item\(idx)] has \(userInfo.count) key(s)" as NSString)
-            for (k, v) in userInfo {
-                let rendered = renderForDiagnostic(v)
-                NSLog("%@", "[SE-fallback] userInfo[item\(idx)][\(k)] = \(rendered)" as NSString)
-            }
-            if let url = findUrlInAny(userInfo) {
-                NSLog("%@", "[SE-fallback] resolved via userInfo (item \(idx)): \(url)" as NSString)
-                completion(url)
-                return
-            }
-        }
-        NSLog("[SE-fallback] userInfo: no URL across all items — Safari did not pass the URL through any channel we read")
-        completion(nil)
-    }
-
-    /// Helper for the userInfo diagnostic dump. Truncates long values
-    /// and prints NSItemProvider's registeredTypeIdentifiers rather
-    /// than its raw description — far more useful for diagnosing what
-    /// data Safari attached.
-    private func renderForDiagnostic(_ v: Any) -> String {
-        if let provider = v as? NSItemProvider {
-            return "NSItemProvider(types=\(provider.registeredTypeIdentifiers.joined(separator: ",")))"
-        }
-        if let arr = v as? [NSItemProvider] {
-            let summary = arr.map {
-                "NSItemProvider(types=\($0.registeredTypeIdentifiers.joined(separator: ",")))"
-            }.joined(separator: " ; ")
-            return "[\(summary)]"
-        }
-        let str = String(describing: v)
-        if str.count > 300 {
-            return String(str.prefix(300)) + "…"
-        }
-        return str
-    }
-
-    /// Recursive worker for source C. Loads each property-list
-    /// attachment in turn; first http(s) URL found across any string
-    /// leaf wins.
-    private func scanPropertyListAttachments(
-        _ providers: [NSItemProvider],
-        index: Int,
-        completion: @escaping (String?) -> Void
-    ) {
-        if index >= providers.count {
-            NSLog("%@", "[SE-fallback] property-list scan exhausted (\(providers.count) attachment(s)), no URL" as NSString)
-            completion(nil)
-            return
-        }
-        let provider = providers[index]
-        provider.loadItem(forTypeIdentifier: UTType.propertyList.identifier, options: nil) { [weak self] data, _ in
+    /// Arms the 5-second "save anyway" timeout. Called once per share,
+    /// right after continueWithSharedUrl resolves the URL.
+    private func armReadyTimeout() {
+        readyTimeoutTimer?.invalidate()
+        readyTimeoutTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { [weak self] _ in
             DispatchQueue.main.async {
-                guard let self = self else { completion(nil); return }
-                if let url = self.findUrlInAny(data) {
-                    NSLog("%@", "[SE-fallback] resolved via property-list #\(index): \(url)" as NSString)
-                    completion(url)
-                    return
-                }
-                self.scanPropertyListAttachments(providers, index: index + 1, completion: completion)
+                guard let self = self else { return }
+                NSLog("[SortlistShareExtension] ready-timeout fired — flipping to .ready with placeholder")
+                self.transitionToReadyIfNeeded()
             }
         }
     }
 
-    /// Walk an arbitrary property-list value (dict / array / string /
-    /// URL / nested) and return the first http(s) URL found in any
-    /// string leaf. Handles both [String: Any] and [AnyHashable: Any]
-    /// dicts because property lists can deserialize as either.
-    private func findUrlInAny(_ any: Any?) -> String? {
-        guard let any = any else { return nil }
-        if let str = any as? String {
-            return firstHttpUrl(in: str)
-        }
-        if let url = any as? URL {
-            return firstHttpUrl(in: url.absoluteString)
-        }
-        if let nsurl = any as? NSURL, let s = nsurl.absoluteString {
-            return firstHttpUrl(in: s)
-        }
-        if let dict = any as? [String: Any] {
-            for (_, v) in dict {
-                if let url = findUrlInAny(v) { return url }
+    /// Flip to the .ready state if we haven't already. Idempotent —
+    /// called from both the timeout AND the scrape-completion paths,
+    /// whichever fires first wins. Subsequent calls are no-ops and
+    /// just refresh the preview card so late-arriving metadata still
+    /// shows up in place.
+    private func transitionToReadyIfNeeded() {
+        readyTimeoutTimer?.invalidate()
+        readyTimeoutTimer = nil
+        if !hasReachedReady {
+            hasReachedReady = true
+            state = .ready
+            if let imgUrl = scrapedProduct?.imageUrl, !imgUrl.isEmpty {
+                loadProductImage(from: imgUrl)
             }
-            return nil
-        }
-        if let dict = any as? [AnyHashable: Any] {
-            for (_, v) in dict {
-                if let url = findUrlInAny(v) { return url }
+        } else {
+            // Already in .ready — just refresh the card with the
+            // latest scrapedProduct values.
+            renderProductCard()
+            if productImageView.image == nil,
+               let imgUrl = scrapedProduct?.imageUrl, !imgUrl.isEmpty {
+                loadProductImage(from: imgUrl)
             }
-            return nil
         }
-        if let arr = any as? [Any] {
-            for v in arr {
-                if let url = findUrlInAny(v) { return url }
-            }
-            return nil
-        }
-        return nil
     }
 
-    /// Extract the first http(s) URL from arbitrary text. Trims common
-    /// trailing punctuation that regex \S+ over-greedily includes,
-    /// then validates the scheme is http(s). Returns the canonicalised
-    /// absoluteString or nil.
-    private func firstHttpUrl(in text: String) -> String? {
-        guard let range = text.range(of: #"https?://\S+"#, options: .regularExpression) else {
-            return nil
-        }
-        var s = String(text[range])
-        while let last = s.last, ",.;:)>]\"'".contains(last) {
-            s = String(s.dropLast())
-        }
-        guard
-            let parsed = URL(string: s),
-            let scheme = parsed.scheme?.lowercased(),
-            scheme == "http" || scheme == "https"
-        else {
-            return nil
-        }
-        return parsed.absoluteString
-    }
+    // [REMOVED v1.1 build 31] Paste-recovery dialog + Sources A/B/C/D
+    // fallback chain + diagnostic [SE-fallback] logs lived here.
+    // They existed only to work around the fact that the JS preprocessor's
+    // webpage-activation mode silently dropped Safari's standard
+    // public.url attachment, leaving heavy-CSP retailers (M&S, Zara,
+    // ASOS) with no URL to fall back on. The preprocessor is gone in
+    // this build; we now activate in URL-only mode (same channel
+    // Messages / WhatsApp / Mail use), which delivers public.url
+    // reliably for every Safari share. The entire recovery chain is
+    // unreachable in normal operation and has been deleted.
 
-    /// Genuine paste-required path. Only reached when both standard
-    /// extraction AND the additional-source search came up empty —
-    /// most likely a share from a non-browser app with no URL anywhere
-    /// in the payload, or a particularly hostile retailer page. Copy
-    /// is framed as "retailer restrictions" so the user sees the cause
-    /// rather than blaming Sortlist.
-    private func showManualUrlDialog() {
-        let alert = UIAlertController(
-            title: "Retailer restrictions",
-            message: "This site limits automatic product detection. Paste the product URL below and we’ll save it for you.",
-            preferredStyle: .alert
-        )
-        alert.addTextField { tf in
-            tf.placeholder = "https://..."
-            tf.keyboardType = .URL
-            tf.autocapitalizationType = .none
-            tf.autocorrectionType = .no
-            tf.spellCheckingType = .no
-            // Pre-fill from the clipboard if it looks URL-shaped — saves
-            // a tap when the user just copied the URL out of Safari.
-            if let clip = UIPasteboard.general.string?
-                .trimmingCharacters(in: .whitespacesAndNewlines),
-               clip.range(of: #"^https?://\S+"#, options: .regularExpression) != nil {
-                tf.text = clip
-            }
-        }
-        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { [weak self] _ in
-            self?.state = .error(message: "Sharing cancelled.", detail: nil)
-        })
-        alert.addAction(UIAlertAction(title: "Save", style: .default) { [weak self] _ in
-            guard let self = self else { return }
-            let raw = (alert.textFields?.first?.text ?? "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard
-                let url = URL(string: raw),
-                let scheme = url.scheme?.lowercased(),
-                scheme == "http" || scheme == "https"
-            else {
-                self.state = .error(
-                    message: "That doesn’t look like a valid URL.",
-                    detail: nil
-                )
-                return
-            }
-            self.sharedURL = raw
-            self.state = .loading(message: "Reading shared link…")
-            self.continueWithSharedUrl(raw)
-        })
-        present(alert, animated: true)
-    }
 
     // MARK: - Redirect resolution
 
@@ -1191,9 +1062,18 @@ final class ShareViewController: UIViewController {
     }
 
     private func saveButtonLabel() -> String {
+        // "Save anyway" wording when we reached .ready via the 5s timeout
+        // without any scrape data — signals to the user that they're
+        // saving with URL only and that we couldn't auto-detect details.
+        // The save still goes through; backend continues scraping in the
+        // background after the share extension closes.
+        let scrapeIncomplete = (scrapedProduct?.title?.isEmpty ?? true)
+            && (scrapedProduct?.imageUrl?.isEmpty ?? true)
         switch selectedChoice {
-        case .createNew: return "Create & Save"
-        default:         return "Save to Sortlist"
+        case .createNew:
+            return scrapeIncomplete ? "Create & Save anyway" : "Create & Save"
+        default:
+            return scrapeIncomplete ? "Save anyway" : "Save to Sortlist"
         }
     }
 
@@ -1238,49 +1118,23 @@ final class ShareViewController: UIViewController {
             }
         }
         if allAttachments.isEmpty {
-            // Recoverable — fall through to additional-source search,
-            // then dialog only if those also fail.
-            promptForManualUrl()
+            // With URL-only activation, Safari always passes at least a
+            // public.url attachment for webpage shares. Hitting this
+            // branch means a non-Safari host activated us with an empty
+            // payload — genuinely nothing we can do. Hard error.
+            state = .error(
+                message: "Nothing to share.",
+                detail: "Open a product page in Safari and try Share again."
+            )
             return
         }
 
-        // STEP 1: JS preprocessor result, if present anywhere.
-        if let jsProvider = allAttachments.first(where: {
-            $0.hasItemConformingToTypeIdentifier(UTType.propertyList.identifier)
-        }) {
-            jsProvider.loadItem(forTypeIdentifier: UTType.propertyList.identifier, options: nil) { [weak self] data, _ in
-                DispatchQueue.main.async {
-                    guard let self = self else { return }
-                    if let outer = data as? [String: Any],
-                       let inner = outer[NSExtensionJavaScriptPreprocessingResultsKey] as? [String: Any],
-                       let urlString = (inner["url"] as? String).nonEmpty {
-                        self.consumeJSPreprocessorResult(inner, fallbackUrl: urlString)
-                        completion()
-                        return
-                    }
-                    // Property list present but unusable — fall through.
-                    self.extractFromUrlOrText(all: allAttachments, completion: completion)
-                }
-            }
-            return
-        }
-
-        // STEP 2+: try URL providers, then text providers.
+        // URL-only activation channel: Step 1 (JS preprocessor) was removed
+        // in v1.1 build 31 — see the comment block above (and Info.plist).
+        // We now go straight to the public.url provider, with text-attachment
+        // regex extraction as a fallback for non-browser apps that share
+        // plain text containing a URL.
         extractFromUrlOrText(all: allAttachments, completion: completion)
-    }
-
-    /// Stash the JS preprocessor's output as sharedURL + scrapedProduct.
-    /// The Swift side prefers JS values over server values, so anything
-    /// found here will shadow whatever meta.fetch returns later.
-    private func consumeJSPreprocessorResult(_ dict: [String: Any], fallbackUrl: String) {
-        sharedURL = (dict["url"] as? String).nonEmpty ?? fallbackUrl
-        scrapedProduct = ScrapedProduct(
-            title:    (dict["title"] as? String).nonEmpty,
-            imageUrl: (dict["image"] as? String).nonEmpty,
-            price:    (dict["price"] as? String).nonEmpty,
-            currency: (dict["currency"] as? String).nonEmpty,
-            siteName: (dict["siteName"] as? String).nonEmpty
-        )
     }
 
     /// Walks the (already-flattened) attachment list looking for any
@@ -1334,9 +1188,13 @@ final class ShareViewController: UIViewController {
             return nil
         }
         if textProviders.isEmpty {
-            // Recoverable — fall through to additional-source search,
-            // then dialog only if those also fail.
-            promptForManualUrl()
+            // URL-only activation: Safari always delivers public.url, so
+            // we never expect to reach this branch from a Safari share.
+            // Non-Safari hosts may pass neither URL nor text — error out.
+            state = .error(
+                message: "Couldn't read shared content.",
+                detail: "Open a product page in Safari and try Share again."
+            )
             return
         }
         tryNextTextProvider(textProviders, index: 0, completion: completion)
@@ -1348,9 +1206,10 @@ final class ShareViewController: UIViewController {
         completion: @escaping () -> Void
     ) {
         if index >= providers.count {
-            // Recoverable — fall through to additional-source search,
-            // then dialog only if those also fail.
-            promptForManualUrl()
+            state = .error(
+                message: "No link found in shared text.",
+                detail: nil
+            )
             return
         }
         let (provider, typeId) = providers[index]
@@ -1399,18 +1258,8 @@ final class ShareViewController: UIViewController {
             }
         }
 
-        let jsCovered = scrapedProduct?.title != nil
-            && scrapedProduct?.imageUrl != nil
-        if jsCovered {
-            // JS preprocessor (Safari share) already produced title +
-            // image. Skip both the on-device WKWebView path AND the
-            // server meta.fetch — we already have the best signal.
-            return
-        }
-
-        // Three-tier fallback chain for shares that didn't come from Safari
-        // (e.g. the Zara Home iOS app shares us a URL with no preprocessor
-        // result):
+        // Two-tier scrape chain. With URL-only activation we never have
+        // preprocessor data to start with, so the scrape ALWAYS runs:
         //   1. OnDeviceScraper — load the URL in a hidden WKWebView from
         //      the user's actual iPhone IP. Most reliable: real Safari
         //      fingerprint + residential IP defeats the bot blockers that
@@ -1418,16 +1267,17 @@ final class ShareViewController: UIViewController {
         //   2. Server meta.fetch — fallback when on-device scrape times
         //      out or returns no usable data (cold device, page requires
         //      login, etc.).
-        //   3. Save with URL only if even that fails (handled at save time).
+        //
+        // Each completion calls transitionToReadyIfNeeded — first to fire
+        // flips us out of .loading into .ready (the 5-second armReadyTimeout
+        // is the third path that can do this). Subsequent calls just
+        // refresh the preview card in place so late-arriving metadata
+        // still shows up without disrupting the user.
         runOnDeviceScrape(urlString: url) { [weak self] scraped in
             guard let self = self else { return }
             if let scraped = scraped {
                 self.mergeScrapedData(scraped)
-                self.renderProductCard()
-                if self.productImageView.image == nil,
-                   let imgUrl = self.scrapedProduct?.imageUrl, !imgUrl.isEmpty {
-                    self.loadProductImage(from: imgUrl)
-                }
+                self.transitionToReadyIfNeeded()
                 // If the on-device path gave us both title AND image,
                 // skip the server round-trip — we have enough.
                 if self.scrapedProduct?.title != nil
@@ -1443,15 +1293,15 @@ final class ShareViewController: UIViewController {
                     switch result {
                     case .success(let server):
                         self.mergeScrapedData(server)
-                        self.renderProductCard()
-                        if self.productImageView.image == nil,
-                           let imgUrl = self.scrapedProduct?.imageUrl,
-                           !imgUrl.isEmpty {
-                            self.loadProductImage(from: imgUrl)
-                        }
                     case .failure(let msg):
                         NSLog("[SortlistShareExtension] meta.fetch failed: %@", msg)
+                        // Even on failure, transition to ready so the
+                        // save button is reachable. mergeScrapedData
+                        // wasn't called, so scrapedProduct stays at
+                        // whatever we have (placeholder siteName +
+                        // anything the on-device pass managed to add).
                     }
+                    self.transitionToReadyIfNeeded()
                 }
             }
         }
@@ -1818,12 +1668,16 @@ final class ShareViewController: UIViewController {
     @objc private func onCancel() {
         if didFinish { return }
         didFinish = true
+        readyTimeoutTimer?.invalidate()
+        readyTimeoutTimer = nil
         extensionContext?.cancelRequest(withError: NSError(domain: "user.cancel", code: 0))
     }
 
     private func dismissExtension() {
         if didFinish { return }
         didFinish = true
+        readyTimeoutTimer?.invalidate()
+        readyTimeoutTimer = nil
         extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
     }
 

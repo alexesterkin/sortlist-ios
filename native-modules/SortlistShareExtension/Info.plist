@@ -26,27 +26,27 @@
 		<dict>
 			<key>NSExtensionActivationRule</key>
 			<dict>
-				<!-- Triggered when the host (e.g. Safari) hands us a URL value
-				     directly, e.g. from a Copy Link context. -->
+				<!-- URL activation — Safari "Share" button, Copy Link, any
+				     other app that shares a URL. This is now our ONLY
+				     activation channel for webpage shares; we removed
+				     NSExtensionActivationSupportsWebPageWithMaxCount + the
+				     JS preprocessor in v1.1 build 31 because preprocessor
+				     mode silently dropped the public.url attachment that
+				     URL mode reliably delivers — Safari delivers EITHER
+				     the preprocessor result OR public.url for a given
+				     share, not both, and the preprocessor returned no URL
+				     on heavy-CSP retailers like M&S. URL-only mode is
+				     the same channel Messages / WhatsApp / Mail / Notes
+				     use; it's been bulletproof for them. We trade
+				     instant in-page metadata scraping (gone) for
+				     universal URL extraction. Backend meta.fetch +
+				     OnDeviceScraper fill in title/image/price asynchronously
+				     after the URL is in hand. -->
 				<key>NSExtensionActivationSupportsWebURLWithMaxCount</key>
-				<integer>1</integer>
-				<!-- Triggered when the user shares from a web page in Safari.
-				     This is the path that ALSO runs our JS preprocessor below.
-				     Without this rule the preprocessor never fires and we lose
-				     the real window.location.href + local OG scrape. -->
-				<key>NSExtensionActivationSupportsWebPageWithMaxCount</key>
 				<integer>1</integer>
 				<key>NSExtensionActivationSupportsText</key>
 				<true/>
 			</dict>
-			<!-- Filename (no extension) of the bundled JS preprocessor.
-			     ShareExtensionPreprocessor.js is in the .appex's Resources
-			     phase; Safari loads it into the page and calls
-			     ExtensionPreprocessingJS.run({completionFunction}) right
-			     before activating the extension. The returned dict is
-			     delivered to Swift via a kUTTypePropertyList attachment. -->
-			<key>NSExtensionJavaScriptPreprocessingFile</key>
-			<string>ShareExtensionPreprocessor</string>
 		</dict>
 		<key>NSExtensionPointIdentifier</key>
 		<string>com.apple.share-services</string>

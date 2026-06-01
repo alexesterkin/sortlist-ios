@@ -122,12 +122,15 @@ function withExtensionXcodeTarget(config) {
     // Sources phase — only Swift file.
     const sourcesFileEntries = ['ShareViewController.swift'];
 
-    // Resources phase — the JS preprocessor file MUST be bundled inside
-    // the .appex's Resources/ directory so Info.plist's
-    // NSExtensionJavaScriptPreprocessingFile reference resolves at
-    // runtime. Without this, Safari skips the preprocessor entirely
-    // and the SE never gets the real window.location.href or the
-    // local OG scrape.
+    // Resources phase — the JS scraping script bundled into the .appex's
+    // Resources/ directory. As of v1.1 build 31 the Info.plist no longer
+    // declares NSExtensionJavaScriptPreprocessingFile (we dropped Safari's
+    // automatic preprocessor mode in favour of URL-only activation so we
+    // reliably receive public.url for every Safari share). The script is
+    // still bundled because the OnDeviceScraper in ShareViewController.swift
+    // loads it from the bundle at runtime and injects it into a hidden
+    // WKWebView to scrape product metadata using the user's residential
+    // IP — a separate use case from Safari's preprocessor injection.
     const resourceFileEntries = ['ShareExtensionPreprocessor.js'];
 
     // Frameworks the extension needs. UIKit / Foundation / Security come
