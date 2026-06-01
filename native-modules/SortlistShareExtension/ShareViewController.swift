@@ -155,6 +155,13 @@ final class ShareViewController: UIViewController {
     // scrapedProduct.price.
     private let manualPriceField = UITextField()
 
+    // Small explainer line that sits above manualPriceField and names
+    // the retailer that didn't share the price ("Marks & Spencer
+    // didn't share the price. Add it if you'd like:"). Reframes the
+    // field as transparency about a retailer limit rather than an
+    // unexplained input. Shown/hidden in lockstep with the field.
+    private let manualPriceExplainerLabel = UILabel()
+
     // Ready state — picker + form
     private let saveToHeader = UILabel()
     private let pickerButton = UIButton(type: .system)
@@ -678,7 +685,28 @@ final class ShareViewController: UIViewController {
         // Optional manual price field — see field declaration comment.
         // Hidden by default; renderState/.ready and renderProductCard
         // flip visibility based on whether scrapedProduct.price is set.
-        manualPriceField.placeholder = "Price (optional)"
+        // Explainer label — small, ink-muted. Text is set per-share in
+        // updateManualPriceFieldVisibility once we know the retailer
+        // name (defaulting to "This site" if scrapedProduct.siteName
+        // is nil for any reason). Sits directly above the field with
+        // a tight 4pt gap.
+        manualPriceExplainerLabel.font = UIFont.systemFont(ofSize: 12, weight: .regular)
+        manualPriceExplainerLabel.textColor = Self.inkMuted
+        manualPriceExplainerLabel.numberOfLines = 1
+        manualPriceExplainerLabel.lineBreakMode = .byTruncatingTail
+        manualPriceExplainerLabel.isHidden = true
+        manualPriceExplainerLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        // Use attributedPlaceholder rather than .placeholder so the
+        // placeholder colour is explicit — default UITextField placeholder
+        // opacity reads as washed-out against our cream backgrounds.
+        // inkMuted (0.55 alpha) matches the existing brand-system
+        // muted-text treatment used by inlineError fallbacks, loading
+        // label, and the SAVE TO SORTLIST eyebrow.
+        manualPriceField.attributedPlaceholder = NSAttributedString(
+            string: "£0.00",
+            attributes: [.foregroundColor: Self.inkMuted]
+        )
         manualPriceField.font = UIFont.systemFont(ofSize: 15)
         manualPriceField.textColor = Self.ink
         manualPriceField.backgroundColor = Self.cream
@@ -710,6 +738,7 @@ final class ShareViewController: UIViewController {
         readyStack.spacing = 14
         readyStack.alignment = .fill
         readyStack.addArrangedSubview(productCard)
+        readyStack.addArrangedSubview(manualPriceExplainerLabel)
         readyStack.addArrangedSubview(manualPriceField)
         readyStack.addArrangedSubview(saveToHeader)
         readyStack.addArrangedSubview(pickerButton)
@@ -717,6 +746,10 @@ final class ShareViewController: UIViewController {
         readyStack.addArrangedSubview(inlineError)
         readyStack.addArrangedSubview(saveButton)
         readyStack.addArrangedSubview(cancelButton)
+        // Tight 4pt between the explainer line and the field so they
+        // read as a unit. Default 14pt would feel like two unrelated
+        // pieces.
+        readyStack.setCustomSpacing(4, after: manualPriceExplainerLabel)
         readyStack.setCustomSpacing(8, after: saveToHeader)
         readyStack.setCustomSpacing(10, after: pickerButton)
         readyStack.setCustomSpacing(10, after: newListField)
@@ -991,17 +1024,30 @@ final class ShareViewController: UIViewController {
         updateManualPriceFieldVisibility()
     }
 
-    /// Show the optional manual price field iff no scraped price is
-    /// available. Called from renderProductCard so it stays in sync
-    /// with every scrape update — if a late-arriving server scrape
-    /// fills in the price, the manual field auto-hides (and any
-    /// value the user typed is discarded in favour of the scrape).
-    /// Inverse: if scrape returns empty price, the field appears.
+    /// Show the optional manual price field + its retailer-named
+    /// explainer line iff no scraped price is available. Called from
+    /// renderProductCard so they stay in sync with every scrape update
+    /// — if a late-arriving server scrape fills in the price, both
+    /// hide (and any value the user typed is discarded in favour of
+    /// the scrape). Inverse: if scrape returns empty price, both
+    /// appear with the retailer name slotted in.
     private func updateManualPriceFieldVisibility() {
         let havePrice = (scrapedProduct?.price?.isEmpty == false)
         let shouldShow = !havePrice
+
+        // Set the explainer text using the friendly retailer name
+        // already populated on scrapedProduct.siteName (seeded by
+        // continueWithSharedUrl's friendlyHostName call). Falls back
+        // to "This site" if siteName is somehow nil — defensive.
+        let retailer = scrapedProduct?.siteName ?? "This site"
+        manualPriceExplainerLabel.text =
+            "\(retailer) didn’t share the price. Add it if you’d like:"
+
         if manualPriceField.isHidden == shouldShow {
             manualPriceField.isHidden = !shouldShow
+        }
+        if manualPriceExplainerLabel.isHidden == shouldShow {
+            manualPriceExplainerLabel.isHidden = !shouldShow
         }
         if havePrice {
             // Scrape filled in the price after the user already typed
