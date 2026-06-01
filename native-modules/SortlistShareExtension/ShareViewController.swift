@@ -146,6 +146,15 @@ final class ShareViewController: UIViewController {
     private let productTitleLabel = UILabel()
     private let priceLabel = UILabel()
 
+    // Optional manual-entry price field. Shown ONLY when the scrape
+    // didn't return a price (M&S is the canonical case; some COS /
+    // ASOS pages too). User can type a price in their native currency
+    // notation ("£24.99", "$24.99") — the backend's price parser
+    // handles the symbol. Empty = save without a price, no friction.
+    // Hides automatically if a late-arriving scrape result populates
+    // scrapedProduct.price.
+    private let manualPriceField = UITextField()
+
     // Ready state — picker + form
     private let saveToHeader = UILabel()
     private let pickerButton = UIButton(type: .system)
@@ -666,10 +675,42 @@ final class ShareViewController: UIViewController {
         inlineError.isHidden = true
         inlineError.translatesAutoresizingMaskIntoConstraints = false
 
+        // Optional manual price field — see field declaration comment.
+        // Hidden by default; renderState/.ready and renderProductCard
+        // flip visibility based on whether scrapedProduct.price is set.
+        manualPriceField.placeholder = "Price (optional)"
+        manualPriceField.font = UIFont.systemFont(ofSize: 15)
+        manualPriceField.textColor = Self.ink
+        manualPriceField.backgroundColor = Self.cream
+        manualPriceField.borderStyle = .none
+        manualPriceField.layer.cornerRadius = 10
+        manualPriceField.layer.borderWidth = 1
+        manualPriceField.layer.borderColor = Self.inkSubtle.cgColor
+        // Match the existing newListField padding pattern (leftView/
+        // rightView spacer views) — UITextField doesn't have a native
+        // padding property and other approaches break layout in
+        // unexpected ways inside UIStackView arranged subviews.
+        let priceLeftPad = UIView(frame: CGRect(x: 0, y: 0, width: 14, height: 1))
+        manualPriceField.leftView = priceLeftPad
+        manualPriceField.leftViewMode = .always
+        manualPriceField.rightView = UIView(frame: CGRect(x: 0, y: 0, width: 14, height: 1))
+        manualPriceField.rightViewMode = .always
+        // .numbersAndPunctuation lets users type "£24.99" / "$24.99"
+        // without switching keyboards. Backend price parser accepts
+        // raw values with symbols.
+        manualPriceField.keyboardType = .numbersAndPunctuation
+        manualPriceField.autocorrectionType = .no
+        manualPriceField.autocapitalizationType = .none
+        manualPriceField.returnKeyType = .done
+        manualPriceField.delegate = self
+        manualPriceField.isHidden = true
+        manualPriceField.translatesAutoresizingMaskIntoConstraints = false
+
         readyStack.axis = .vertical
         readyStack.spacing = 14
         readyStack.alignment = .fill
         readyStack.addArrangedSubview(productCard)
+        readyStack.addArrangedSubview(manualPriceField)
         readyStack.addArrangedSubview(saveToHeader)
         readyStack.addArrangedSubview(pickerButton)
         readyStack.addArrangedSubview(newListField)
@@ -681,6 +722,9 @@ final class ShareViewController: UIViewController {
         readyStack.setCustomSpacing(10, after: newListField)
         readyStack.setCustomSpacing(18, after: inlineError)
         readyStack.setCustomSpacing(6, after: saveButton)
+        // Pin the manual price field height to match the other form
+        // controls (44pt is the standard iOS touch-target minimum).
+        manualPriceField.heightAnchor.constraint(equalToConstant: 44).isActive = true
         readyStack.translatesAutoresizingMaskIntoConstraints = false
         cardView.addSubview(readyStack)
 
@@ -942,6 +986,28 @@ final class ShareViewController: UIViewController {
 
         if productImageView.image == nil {
             productImagePlaceholder.isHidden = false
+        }
+
+        updateManualPriceFieldVisibility()
+    }
+
+    /// Show the optional manual price field iff no scraped price is
+    /// available. Called from renderProductCard so it stays in sync
+    /// with every scrape update — if a late-arriving server scrape
+    /// fills in the price, the manual field auto-hides (and any
+    /// value the user typed is discarded in favour of the scrape).
+    /// Inverse: if scrape returns empty price, the field appears.
+    private func updateManualPriceFieldVisibility() {
+        let havePrice = (scrapedProduct?.price?.isEmpty == false)
+        let shouldShow = !havePrice
+        if manualPriceField.isHidden == shouldShow {
+            manualPriceField.isHidden = !shouldShow
+        }
+        if havePrice {
+            // Scrape filled in the price after the user already typed
+            // something — clear the stale manual value so it doesn't
+            // sneak into the save payload via the fallback path.
+            manualPriceField.text = nil
         }
     }
 
@@ -1307,10 +1373,69 @@ final class ShareViewController: UIViewController {
         }
     }
 
+    /// Bot-block / anti-scraper title patterns. Substring match,
+    /// case-insensitive. Matched against the title field only — these
+    /// phrases are unique enough that no legitimate product title
+    /// would contain them, and the title is the most reliable signal
+    /// (image URLs to block pages vary too much across retailers to
+    /// enumerate). Triggered by Zara Home flicker (Build 31): server
+    /// meta.fetch returned "Access Denied" from datacenter IPs and
+    /// the merge briefly displayed it before on-device's residential-IP
+    /// scrape result. Now we discard the whole incoming scrape if
+    /// its title matches any of these — preserves whatever the
+    /// previous merge stored (typically the real on-device result).
+    private static let botBlockTitlePatterns: [String] = [
+        "access denied",
+        "robot check",
+        "are you human",
+        "verify you are human",
+        "just a moment",
+        "pardon our interruption",
+        "checking your browser",
+        "please enable javascript",
+        "please enable cookies",
+        "captcha",
+        "ddos-guard",
+        "cf-browser-verification",
+        "unusual traffic",
+        "security check",
+        "forbidden",
+        "blocked by",
+    ]
+
+    private func isLikelyBotBlock(_ data: ScrapedProduct) -> Bool {
+        guard let title = data.title?.lowercased(), !title.isEmpty else {
+            return false
+        }
+        for pattern in Self.botBlockTitlePatterns {
+            if title.contains(pattern) {
+                return true
+            }
+        }
+        return false
+    }
+
     /// Merge an incoming ScrapedProduct into self.scrapedProduct, preferring
     /// existing values and filling in nils from the new one. Used by both
     /// the on-device WKWebView path and the server meta.fetch fallback.
+    ///
+    /// Front gate: if the incoming scrape's title matches a known
+    /// anti-bot block phrase ("Access Denied", "Just a moment",
+    /// "Blocked by Cloudflare", etc.), discard the ENTIRE incoming
+    /// payload — including image/price/siteName, since on a block
+    /// page those fields are equally garbage (default logos, $0,
+    /// generic site name). The previous merge result (typically the
+    /// on-device WKWebView scrape with its residential IP advantage)
+    /// is left intact. Zero risk to working retailers — no legitimate
+    /// product title contains these phrases.
     private func mergeScrapedData(_ incoming: ScrapedProduct) {
+        if isLikelyBotBlock(incoming) {
+            NSLog(
+                "%@",
+                "[Merge] discarding suspected bot-block scrape: title=\"\(incoming.title ?? "")\"" as NSString
+            )
+            return
+        }
         scrapedProduct = ScrapedProduct(
             title:    scrapedProduct?.title    ?? incoming.title,
             imageUrl: scrapedProduct?.imageUrl ?? incoming.imageUrl,
@@ -1463,7 +1588,17 @@ final class ShareViewController: UIViewController {
         var input: [String: Any] = ["url": url]
         if let title = scrapedProduct?.title { input["title"] = title }
         if let img = scrapedProduct?.imageUrl { input["imageUrl"] = img }
-        if let price = scrapedProduct?.price { input["price"] = price }
+        if let price = scrapedProduct?.price, !price.isEmpty {
+            input["price"] = price
+        } else if let manual = manualPriceField.text?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !manual.isEmpty {
+            // Scrape didn't return a price; the user filled in the
+            // optional field. Send the raw value — backend's price
+            // parser strips currency symbols ($, £, €) and normalises
+            // formats like "$24.99" / "£24" / "24,99".
+            input["price"] = manual
+        }
         if let currency = scrapedProduct?.currency { input["currency"] = currency }
         if let site = scrapedProduct?.siteName { input["siteName"] = site }
 
