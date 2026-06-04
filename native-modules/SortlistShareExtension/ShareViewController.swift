@@ -122,6 +122,12 @@ final class ShareViewController: UIViewController {
     // trigger the .ready transition or just refresh the preview card.
     private var hasReachedReady = false
 
+    // Bottom constraint on the cardView, mutated when the keyboard
+    // shows/hides/changes so the active text field stays above the
+    // keyboard instead of being covered. Set in buildLayout; nudged
+    // by the keyboardWillChangeFrame handler.
+    private var cardBottomConstraint: NSLayoutConstraint!
+
     // MARK: - Subviews
 
     // Always-present chrome
@@ -202,6 +208,19 @@ final class ShareViewController: UIViewController {
         super.viewDidLoad()
         buildLayout()
 
+        // Keyboard avoidance — see keyboardWillChangeFrame. We observe
+        // willChangeFrame (rather than separate willShow + willHide)
+        // because the single notification covers show, hide, and
+        // mid-flight frame changes (rotation, keyboard switch). Removed
+        // in deinit so we don't dangle if the SE process is reaped
+        // mid-edit.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(keyboardWillChangeFrame(_:)),
+            name: UIResponder.keyboardWillChangeFrameNotification,
+            object: nil
+        )
+
         // Read JWT first — if missing, we can short-circuit to an error
         // before bothering with the share-item extraction.
         guard let token = readJWT() else {
@@ -218,6 +237,59 @@ final class ShareViewController: UIViewController {
             guard let self = self, let rawUrl = self.sharedURL else { return }
             self.continueWithSharedUrl(rawUrl)
         }
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    // MARK: - Keyboard avoidance
+
+    /// Shift cardView up by the height that the keyboard overlaps it,
+    /// using the system-supplied animation duration + curve so the
+    /// motion is in lockstep with iOS's own keyboard slide.
+    ///
+    /// Works for every UITextField in the sheet — the handler is
+    /// field-agnostic, it just reads the new keyboard frame from the
+    /// notification and computes overlap against cardView. Currently
+    /// triggered by manualPriceField + newListField; future optional
+    /// inputs will benefit automatically.
+    ///
+    /// keyboardFrameEndUserInfoKey is in screen coords (UIKit
+    /// historical quirk) — convert into view coords via
+    /// `view.convert(_:from: nil)` before measuring overlap.
+    @objc private func keyboardWillChangeFrame(_ notification: Notification) {
+        guard
+            let userInfo = notification.userInfo,
+            let endFrameValue = userInfo[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue,
+            let duration = userInfo[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double
+        else { return }
+
+        let endFrameInView = view.convert(endFrameValue.cgRectValue, from: nil)
+        let overlap = max(0, view.bounds.maxY - endFrameInView.minY)
+
+        // Bottom constraint shifts the sheet up by exactly the overlap
+        // amount. constant=0 when keyboard is gone, constant=-overlap
+        // when keyboard covers `overlap` points of the sheet.
+        cardBottomConstraint.constant = -overlap
+
+        let curveRaw = (userInfo[UIResponder.keyboardAnimationCurveUserInfoKey] as? UInt) ?? 0
+        let curveOption = UIView.AnimationOptions(rawValue: curveRaw << 16)
+
+        UIView.animate(
+            withDuration: duration,
+            delay: 0,
+            options: [curveOption, .beginFromCurrentState],
+            animations: { self.view.layoutIfNeeded() }
+        )
+    }
+
+    /// Toolbar Done button target — dismisses whatever field is the
+    /// first responder. Used by manualPriceField's inputAccessoryView
+    /// because its .numbersAndPunctuation keyboard has no return key
+    /// that dismisses on its own.
+    @objc private func dismissKeyboard() {
+        view.endEditing(true)
     }
 
     // Post-extraction flow: resolve any redirect-wrapper URLs, set the
@@ -534,6 +606,13 @@ final class ShareViewController: UIViewController {
         buildSuccessState()
         buildErrorState()
 
+        // Capture the card's bottom constraint as a property so the
+        // keyboardWillChangeFrame handler can mutate its constant to
+        // shift the sheet up when the keyboard appears (and back down
+        // when it dismisses). Constant defaults to 0 = pinned to the
+        // bottom edge.
+        cardBottomConstraint = cardView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+
         // Always-visible chrome constraints
         NSLayoutConstraint.activate([
             dimView.topAnchor.constraint(equalTo: view.topAnchor),
@@ -543,7 +622,7 @@ final class ShareViewController: UIViewController {
 
             cardView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             cardView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            cardView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            cardBottomConstraint,
 
             grabber.topAnchor.constraint(equalTo: cardView.topAnchor, constant: 10),
             grabber.centerXAnchor.constraint(equalTo: cardView.centerXAnchor),
@@ -731,6 +810,22 @@ final class ShareViewController: UIViewController {
         manualPriceField.autocapitalizationType = .none
         manualPriceField.returnKeyType = .done
         manualPriceField.delegate = self
+
+        // Done-button toolbar above the keyboard. The
+        // .numbersAndPunctuation keyboard has no return key that
+        // dismisses, so without this the user has nowhere to tap to
+        // get back to the Save button after typing a price. Flexible
+        // space pushes Done to the right edge (iOS convention).
+        let priceKeyboardToolbar = UIToolbar()
+        priceKeyboardToolbar.barStyle = .default
+        priceKeyboardToolbar.isTranslucent = true
+        priceKeyboardToolbar.sizeToFit()
+        priceKeyboardToolbar.items = [
+            UIBarButtonItem(barButtonSystemItem: .flexibleSpace, target: nil, action: nil),
+            UIBarButtonItem(barButtonSystemItem: .done, target: self, action: #selector(dismissKeyboard)),
+        ]
+        manualPriceField.inputAccessoryView = priceKeyboardToolbar
+
         manualPriceField.isHidden = true
         manualPriceField.translatesAutoresizingMaskIntoConstraints = false
 
