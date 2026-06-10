@@ -18,6 +18,8 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { ErrorBoundary } from '@/components/error-boundary';
 import { Brand } from '@/constants/theme';
+import { useAuth } from '@/lib/auth';
+import { useDeepLinkHandler } from '@/lib/deep-link';
 import { AppProviders } from '@/lib/providers';
 
 // Diagnostic log at module-eval time so iOS Console / `log stream`
@@ -29,6 +31,22 @@ SplashScreen.preventAutoHideAsync().catch((e) => {
   // eslint-disable-next-line no-console
   console.warn('[Sortlist] preventAutoHideAsync failed:', e?.message ?? e);
 });
+
+// Mounts the incoming-URL listener (Universal Links + the legacy
+// sortlist://navigate scheme). Needs auth context, so it lives inside
+// AppProviders as a render-nothing child. This was wired up in the very
+// first build, dropped during the auth-navigation rebuild (e63f324), and
+// orphaned ever since — which left Expo Router's built-in linking as the
+// only handler for Universal Links, dead-ending /shared/{token} links on
+// the Unmatched Route screen. Works in tandem with app/+not-found.tsx:
+// this catches the URL event directly (no flicker through the not-found
+// route on a warm app); the catch-all route covers anything that slips
+// through to Expo Router's own navigation.
+function DeepLinkBridge() {
+  const { isAuthed } = useAuth();
+  useDeepLinkHandler(isAuthed);
+  return null;
+}
 
 const SortlistTheme = {
   ...DefaultTheme,
@@ -94,6 +112,7 @@ export default function RootLayout() {
       <View style={{ flex: 1, backgroundColor: Brand.cream }}>
         <SafeAreaProvider>
           <AppProviders>
+            <DeepLinkBridge />
             <ThemeProvider value={SortlistTheme}>
               <Stack
                 screenOptions={{

@@ -25,6 +25,19 @@ function safeNavigateUrl(raw: unknown): string | null {
 
 export function useDeepLinkHandler(isAuthed: boolean) {
   useEffect(() => {
+    // router.replace throws if the navigation tree isn't mounted yet,
+    // which can happen when getInitialURL resolves first on a cold
+    // start. The URL is already stashed by then, and expo-router's own
+    // initial routing (plus the +not-found forwarder) lands the user in
+    // the right place — so a failed replace here is safe to swallow.
+    const safeReplaceHome = () => {
+      try {
+        router.replace('/(app)' as never);
+      } catch {
+        // no-op — see above
+      }
+    };
+
     const handle = (incomingUrl: string | null) => {
       if (!incomingUrl) return;
 
@@ -44,7 +57,7 @@ export function useDeepLinkHandler(isAuthed: boolean) {
       if (directTarget) {
         setPendingWebViewUrl(directTarget);
         if (isAuthed) {
-          router.replace('/(app)' as never);
+          safeReplaceHome();
         }
         return;
       }
@@ -71,7 +84,7 @@ export function useDeepLinkHandler(isAuthed: boolean) {
           setPendingWebViewUrl(target);
         }
         if (isAuthed) {
-          router.replace('/(app)' as never);
+          safeReplaceHome();
         }
         return;
       }
@@ -82,7 +95,7 @@ export function useDeepLinkHandler(isAuthed: boolean) {
       // flows now. The url= param is currently ignored; if/when we want to
       // pre-fill the web add flow, we can postMessage it into the WebView.
       if (path === 'add' && isAuthed) {
-        router.replace('/(app)' as never);
+        safeReplaceHome();
       }
     };
 
