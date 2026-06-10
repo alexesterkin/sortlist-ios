@@ -25,27 +25,33 @@ function hostnameOf(url: string): string | null {
   }
 }
 
-function pathnameOf(url: string): string | null {
-  try {
-    return new URL(url).pathname;
-  } catch {
-    return null;
-  }
-}
-
 function looksLikeLoginUrl(url: string): boolean {
-  const path = pathnameOf(url);
-  if (!path) return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  const path = parsed.pathname;
   // Conservative match — only treat these exact paths as "the web app
   // bounced us to its sign-in page", which is our signal that the JWT
   // cookie we injected wasn't accepted.
-  return (
+  const isLoginPath =
     path === '/login' ||
     path === '/sign-in' ||
     path === '/signin' ||
     path === '/auth/login' ||
-    path === '/auth/signin'
-  );
+    path === '/auth/signin';
+  if (!isLoginPath) return false;
+  // /login?next=/shared/... is SharedCollectionPage's transient auth-race
+  // bounce: on a cold WebView the page can see auth.me come back null
+  // before the injected cookie settles, redirect to login, and then the
+  // web app signs the user straight back in. Treating that as a real
+  // sign-out put the full-screen "Signed out" overlay over a perfectly
+  // working session. Only a login URL with no shared-link next counts.
+  const next = parsed.searchParams.get('next');
+  if (next && next.startsWith('/shared/')) return false;
+  return true;
 }
 
 export default function WebTabScreen() {
